@@ -1,42 +1,42 @@
-# Lab 11 — BONUS — Reverse Proxy Hardening: Nginx Security Headers, TLS, and Rate Limiting
+# Lab 11 — BONUS — Reverse Proxy Hardening: Nginx + WAF
 
 ![difficulty](https://img.shields.io/badge/difficulty-advanced-red)
 ![topic](https://img.shields.io/badge/topic-Reverse%20Proxy-blue)
-![points](https://img.shields.io/badge/points-10-orange)
-![tech](https://img.shields.io/badge/tech-Nginx%20%2B%20OpenSSL-informational)
+![points](https://img.shields.io/badge/points-10%2B2-orange)
+![tech](https://img.shields.io/badge/tech-Nginx%20%2B%20Coraza-informational)
 
-> **Goal:** Put a hardened Nginx reverse proxy in front of Juice Shop — TLS 1.3, full security-header set, request rate limiting, fail-closed timeouts. Demonstrate each control with curl evidence.
-> **Deliverable:** A PR from `feature/lab11` with `submissions/lab11.md` + your hardened `nginx.conf`. Submit PR link via Moodle.
+> **Goal:** Put a hardened Nginx reverse proxy in front of Juice Shop (TLS 1.3, full security-header set, rate limiting), document the production posture, and (bonus) drop a Coraza WAF + OWASP CRS sidecar in front of Nginx that catches a real attack pattern.
+> **Deliverable:** A PR from `feature/lab11` with `submissions/lab11.md` + your hardened `nginx.conf` (+ Coraza config for the bonus). Submit PR link via Moodle.
 
-> 🌟 **This is a BONUS lab** — 10 pts total (Task 1: 6 + Task 2: 4), no separate bonus row.
-> Bonus labs count toward a separate **30% weight** in your final grade (Lecture 1 README).
-> Difficulty is **advanced** — you're expected to operate more independently than in the main labs.
+> 🌟 **This is a BONUS lab** — 10 pts total (Task 1: 4 + Task 2: 4 + Bonus: 2).
+> Bonus labs count toward a separate **20% weight** in your final grade (see README).
+> Difficulty is **advanced** — you're expected to operate more independently than in main labs.
 
 ---
 
 ## Overview
 
 In this lab you will practice:
-- **Production-grade Nginx config** — listen, upstream, ssl_protocols, http/2
-- **TLS 1.3 + HSTS** — modern cert generation with `openssl`
-- **Security headers** — CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
-- **Rate limiting + connection limits** — `limit_req_zone` + `limit_conn_zone`
-- **Timeouts** — fail-closed behavior, not infinite hangs (Lecture 5/9 themes)
+- **Production-grade Nginx config** — listen, upstream, ssl_protocols, http/2 (Reading 11)
+- **TLS 1.3 + HSTS + security headers** — modern crypto + browser-side defenses
+- **Rate limiting + connection limits + timeouts** — fail-closed defenses
+- **Cipher hardening + session resumption + cert rotation** — production operational posture
+- (Bonus) **WAF layer** — Coraza + OWASP Core Rule Set catching attacks Nginx alone lets pass
 
-> Why this lab matters: every public-facing service runs behind a proxy. The default Nginx config has none of the protections in this lab. Real production hardening starts here.
+> **Read Reading 11 first.** It covers everything in this lab + the surrounding tradeoffs.
 
 ---
 
 ## Project State
 
-**You should have from Labs 1+8:**
-- Juice Shop image (Lab 1) — it'll sit behind your proxy
-- Familiarity with security headers / TLS posture from Lecture 7
+**You should have from Labs 1, 8:**
+- Juice Shop v20.0.0 deployable locally (Lab 1)
+- Familiarity with signed-artifact patterns from Lab 8
 
 **This lab adds:**
 - A working `docker-compose` stack: nginx (in front) + juice-shop (behind)
-- A hardened `nginx.conf` with all controls demonstrated
-- Evidence (curl outputs + access logs) showing each control works
+- A hardened `nginx.conf` with all production-grade controls
+- (Bonus) A Coraza WAF in front of Nginx, catching attacks Nginx alone misses
 
 ---
 
@@ -51,21 +51,17 @@ You need:
 git switch main && git pull
 git switch -c feature/lab11
 
-# Verify
 docker compose version && openssl version
 ```
 
 > **Plumbing provided** (in `labs/lab11/`):
 > - [`labs/lab11/docker-compose.yml`](lab11/docker-compose.yml) — stack with nginx + juice-shop containers wired together
-> - [`labs/lab11/reverse-proxy/`](lab11/reverse-proxy/) — bare-bones starter Nginx config (NOT hardened — you'll harden it)
+> - [`labs/lab11/reverse-proxy/`](lab11/reverse-proxy/) — bare-bones starter Nginx config
 
 ```bash
-ls labs/lab11/docker-compose.yml labs/lab11/reverse-proxy/
-
-# Generate a self-signed cert (3650 days = ~10 years, fine for lab)
+# Generate self-signed cert. File names MUST be localhost.crt/.key —
+# the shipped nginx.conf expects those exact paths under /etc/nginx/certs/.
 mkdir -p labs/lab11/reverse-proxy/certs
-# File names MUST be `localhost.crt` / `localhost.key` — the shipped nginx.conf
-# expects those exact paths under /etc/nginx/certs/.
 openssl req -x509 -nodes -newkey rsa:4096 \
   -keyout labs/lab11/reverse-proxy/certs/localhost.key \
   -out labs/lab11/reverse-proxy/certs/localhost.crt \
@@ -75,58 +71,27 @@ openssl req -x509 -nodes -newkey rsa:4096 \
 
 ---
 
-## Task 1 — TLS + Security Headers + Rate Limiting (6 pts)
+## Task 1 — TLS + Security Headers (4 pts)
 
-**Objective:** Configure Nginx with TLS 1.3 only, the full security-header set, and a working rate limit.
+**Objective:** Configure Nginx with TLS 1.3 only, the full security-header set, and verify every header lands on real responses.
 
-### 11.1: Harden the Nginx config
-
-Edit `labs/lab11/reverse-proxy/nginx.conf`:
+### 11.1: Harden the SSL + headers section of `labs/lab11/reverse-proxy/nginx.conf`
 
 ```nginx
-# YOUR TASK: Hardened Nginx reverse proxy
-# Requirements:
+# YOUR TASK (Task 1 portion): TLS + security headers
+# Requirements (Reading 11 covers each in detail):
 #
-# 1. Listen on 443 only (HTTPS); redirect 80 → 443
-#    - `listen 443 ssl http2;`
-#    - `listen 80;` + `return 301 https://$host$request_uri;` in a separate server block
-#
-# 2. TLS 1.3 only (Lecture 7 misconfig list — old TLS = CKV_AWS_103 territory)
-#    - `ssl_protocols TLSv1.3;`
-#    - `ssl_prefer_server_ciphers off;` (TLS 1.3 ignores this)
-#
-# 3. HSTS (Strict-Transport-Security)
-#    - `add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;`
-#
-# 4. Other required security headers (Lecture 1/5):
-#    - X-Content-Type-Options: nosniff
-#    - X-Frame-Options: DENY
-#    - Referrer-Policy: strict-origin-when-cross-origin
-#    - Permissions-Policy: <something reasonable — e.g., disable camera/microphone>
-#    - Content-Security-Policy: default-src 'self' (start strict; relax only if needed)
-#
-# 5. Rate limit on /api/* paths (defaults to 10 req/s, burst 20)
-#    - `limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;` in http {} block
-#    - `limit_req zone=api burst=20 nodelay;` in the /api location block
-#
-# 6. Connection limit (max concurrent per IP)
-#    - `limit_conn_zone $binary_remote_addr zone=conn:10m;`
-#    - `limit_conn conn 50;`
-#
-# 7. Timeouts (fail-closed)
-#    - `client_body_timeout 10s;`
-#    - `client_header_timeout 10s;`
-#    - `proxy_read_timeout 30s;`
-#    - `proxy_connect_timeout 5s;`
-#
-# 8. Upstream Juice Shop
-#    - `upstream juice_shop { server juice-shop:3000; }`
-#    - All locations proxy_pass to it
-#
-# Hints:
-#   - Use the Mozilla SSL Configuration Generator (https://ssl-config.mozilla.org)
-#     "Modern" profile is TLS 1.3 only — that's what you want
-#   - Always add `always` keyword to add_header (otherwise it disappears on 5xx responses)
+# 1. HTTP server on 80 redirects to HTTPS 443 (301 or 308)
+# 2. HTTPS server on 443: ssl_protocols TLSv1.3 only
+#    `ssl_prefer_server_ciphers off;` (TLS 1.3 ignores this anyway)
+# 3. Six required headers, all with the `always` keyword:
+#    - Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+#    - X-Content-Type-Options "nosniff"
+#    - X-Frame-Options "DENY"
+#    - Referrer-Policy "strict-origin-when-cross-origin"
+#    - Permissions-Policy "camera=(), microphone=(), geolocation=()"
+#    - Content-Security-Policy-Report-Only (start strict; refine iteratively)
+# 4. Upstream proxy to Juice Shop running as the `juice` service on port 3000
 ```
 
 ### 11.2: Bring up the stack
@@ -134,41 +99,26 @@ Edit `labs/lab11/reverse-proxy/nginx.conf`:
 ```bash
 cd labs/lab11
 docker compose up -d
-docker compose ps        # Both containers should be Healthy / Running
-
-# Wait for Juice Shop to be ready (behind the proxy)
-until curl -sk https://localhost/rest/products > /dev/null; do sleep 2; done
+docker compose ps
+until curl -sk https://localhost/rest/admin/application-version > /dev/null; do sleep 2; done
 echo "✅ Juice Shop reachable via Nginx"
-
 cd -
 ```
 
-### 11.3: Test each control
+### 11.3: Verify each control
 
 ```bash
 mkdir -p labs/lab11/results
 
-# A. HTTPS works, HTTP redirects
+# A. HTTPS redirect
 curl -sI http://localhost | tee labs/lab11/results/http-redirect.txt
-# Should see: HTTP/1.1 301 Moved Permanently + Location: https://...
 
-# B. TLS 1.3
-echo | openssl s_client -connect localhost:443 -tls1_3 -brief 2>&1 | head -5 \
+# B. TLS 1.3 negotiation
+echo | openssl s_client -connect localhost:443 -tls1_3 -brief 2>&1 | head -8 \
   | tee labs/lab11/results/tls13.txt
 
 # C. Security headers
 curl -skI https://localhost | tee labs/lab11/results/headers.txt
-# Verify presence of: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, CSP
-
-# D. Rate limit kicks in (>10 req/s)
-seq 1 60 | xargs -n1 -P 60 -I{} curl -sk -o /dev/null -w "%{http_code}\n" \
-  https://localhost/api/ | sort | uniq -c | tee labs/lab11/results/ratelimit.txt
-# Should see a mix of 200 + 429 — at least some 429s
-
-# E. Timeout enforced (slowloris-style)
-# This sends bytes very slowly; nginx should kill after client_header_timeout
-echo "GET / HTTP/1.0" | timeout 15 nc localhost 443 2>&1 | head -5 \
-  | tee labs/lab11/results/timeout.txt
 ```
 
 ### 11.4: Document in `submissions/lab11.md`
@@ -176,43 +126,26 @@ echo "GET / HTTP/1.0" | timeout 15 nc localhost 443 2>&1 | head -5 \
 ```markdown
 # Lab 11 — BONUS — Submission
 
-## Task 1: TLS + Security Headers + Rate Limiting
+## Task 1: TLS + Security Headers
 
-### nginx.conf (paste the SSL + HSTS + header + rate-limit + timeout sections)
+### nginx.conf (paste the SSL + header sections only — not the whole file)
 ```nginx
-<paste relevant sections — not the whole file>
+<paste>
 ```
 
 ### A. HTTPS redirect proof
 ```
-<paste labs/lab11/results/http-redirect.txt — must show 301 to https://>
+<paste http-redirect.txt — must show 301 or 308 to https://>
 ```
 
 ### B. TLS 1.3 proof
 ```
-<paste labs/lab11/results/tls13.txt — must show "Protocol  : TLSv1.3" line>
+<paste tls13.txt — must show "Protocol version: TLSv1.3" line>
 ```
 
-### C. Security headers proof
+### C. Security headers proof (all 6 present)
 ```
-<paste labs/lab11/results/headers.txt — must show ALL 6 headers (HSTS, X-CTO, X-FO, Referrer-Policy, Permissions-Policy, CSP)>
-```
-
-### D. Rate limit proof
-| HTTP code | Count out of 60 |
-|-----------|----------------:|
-| 200 | <n> |
-| 429 | <n> |
-| 5xx | <n> |
-
-Excerpt of access log showing rate-limited requests:
-```
-<docker compose logs nginx | grep -E "limit|429" | head -5>
-```
-
-### E. Timeout enforced
-```
-<paste labs/lab11/results/timeout.txt — should show 408 Request Timeout or connection closed>
+<paste headers.txt — verify HSTS, X-CTO, X-FO, Referrer-Policy, Permissions-Policy, CSP>
 ```
 
 ### What each header defends against (1 sentence each)
@@ -226,79 +159,191 @@ Excerpt of access log showing rate-limited requests:
 
 ---
 
-## Task 2 — Production Posture: Cipher Hardening, OCSP, Cert Rotation (4 pts)
+## Task 2 — Rate Limiting, Timeouts, Cipher Hardening, Cert Rotation (4 pts)
 
-**Objective:** Move beyond the lab cert to production-relevant TLS posture — explicit cipher list, OCSP stapling enabled, document the cert rotation process.
+> ⏭️ Optional. Skipping won't break Task 1 or the bonus.
 
-### 11.5: Strengthen cipher list
+**Objective:** Operationalize the production posture — rate limiting on auth endpoints, fail-closed timeouts, modern cipher list, cert-rotation runbook.
 
-Edit `nginx.conf` to add (TLS 1.3 cipher suites, Mozilla Modern):
-
-```nginx
-# These are the cipher suites in the TLS 1.3 RFC
-ssl_ciphers TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256;
-
-# Curves (modern + safe)
-ssl_ecdh_curve X25519:secp384r1;
-
-# Session resumption (avoid renegotiating TLS for every connection)
-ssl_session_cache shared:SSL:10m;
-ssl_session_timeout 1d;
-ssl_session_tickets off;        # disable to avoid leaking previous-session key material
-```
-
-### 11.6: OCSP stapling (informational — self-signed cert doesn't actually staple)
+### 11.5: Add rate + connection limits + timeouts to `nginx.conf`
 
 ```nginx
-ssl_stapling on;
-ssl_stapling_verify on;
-resolver 8.8.8.8 1.1.1.1 valid=300s;
-resolver_timeout 5s;
+# YOUR TASK (Task 2 portion):
+#
+# 1. Rate limit on /rest/user/login (or /api/* if you prefer):
+#    `limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;`
+#    `limit_req zone=login burst=5 nodelay;` in the location block
+#    `limit_req_status 429;` in the http block
+# 2. Connection limit:
+#    `limit_conn_zone $binary_remote_addr zone=conn:10m;`
+#    `limit_conn conn 50;` per server
+# 3. Timeouts (all fail-closed):
+#    `client_body_timeout 10s; client_header_timeout 10s;`
+#    `proxy_read_timeout 30s; proxy_connect_timeout 5s;`
+# 4. Cipher hardening (Mozilla Modern):
+#    `ssl_ciphers TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256;`
+#    `ssl_ecdh_curve X25519:secp384r1;`
+#    `ssl_session_cache shared:SSL:10m; ssl_session_timeout 1d; ssl_session_tickets off;`
+# 5. (Optional in lab; mandatory in prod) OCSP stapling:
+#    `ssl_stapling on; ssl_stapling_verify on; resolver 8.8.8.8 1.1.1.1 valid=300s;`
+#    (No effect on a self-signed cert — documentation-only here.)
 ```
 
-> Self-signed certs don't have a real CA to query OCSP from, so the directive is effectively documentation. In production with a real CA cert, this avoids cert-status round-trips on every TLS handshake.
-
-### 11.7: Test with `testssl.sh` or manually
+### 11.6: Test the rate limit + timeout
 
 ```bash
-# Reload nginx
-cd labs/lab11
-docker compose restart nginx
-cd -
+# Rate limit: 60 concurrent POSTs to login should produce many 429s
+seq 1 60 | xargs -n1 -P 30 -I{} curl -sk -o /dev/null -w "%{http_code}\n" \
+  https://localhost/rest/user/login 2>/dev/null | sort | uniq -c \
+  | tee labs/lab11/results/ratelimit.txt
 
-# Test cipher list
-echo | openssl s_client -connect localhost:443 -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384 2>&1 \
+# Timeout: send a partial HTTP request slowly; nginx should close after client_header_timeout
+echo "GET / HTTP/1.0" | timeout 15 nc localhost 443 2>&1 | head -5 \
+  | tee labs/lab11/results/timeout.txt
+
+# Cipher: verify TLS 1.3 cipher in use
+echo | openssl s_client -connect localhost:443 -tls1_3 2>&1 \
   | grep -E "Cipher|Server Temp Key" | tee labs/lab11/results/cipher.txt
 ```
 
-### 11.8: Document cert rotation process
+### 11.7: Cert rotation runbook
+
+Write the 7-step runbook described in Reading 11 (Detect expiry → Order → Validate → Atomic swap → Verify → Rollback → Audit). Paste into your submission.
+
+### 11.8: Document in `submissions/lab11.md`
 
 ```markdown
 ## Task 2: Production Posture
 
-### Cipher hardening (paste the ssl_ciphers + ssl_ecdh_curve + ssl_session_* lines)
-```nginx
-<paste>
+### Rate limit proof
+| HTTP code | Count out of 60 |
+|-----------|----------------:|
+| 200 | <n> |
+| 429 | <n> |
+| 5xx | <n> |
+
+### Timeout enforced
+```
+<paste timeout.txt>
 ```
 
-### TLS handshake verification
+### Cipher hardening
 ```
-<paste labs/lab11/results/cipher.txt>
+<paste cipher.txt — must show "Cipher: TLS_AES_256_GCM_SHA384" and "Server Temp Key: X25519">
 ```
 
-### Cert rotation process (write the runbook — 5-7 steps)
-1. **Detect expiry** — <e.g., "monitoring alert on cert expiry < 30 days">
-2. **Order new cert** — <e.g., "Let's Encrypt via certbot, or vendor CA">
-3. **Validate** — <how to verify the new cert is good BEFORE deploying>
-4. **Deploy** — <atomic swap — rename old + new + reload nginx; or use a separate path>
-5. **Verify** — <`curl -vk` to confirm new cert serves; `openssl s_client` to check chain>
-6. **Rollback plan** — <what if the new cert breaks? Keep the old key/cert; one-line revert>
-7. **Audit** — <log to your SIEM / DefectDojo / ticket system>
+### Cert rotation runbook (7 steps)
+1. **Detect expiry**: <how>
+2. **Order new cert**: <how>
+3. **Validate**: <how>
+4. **Atomic swap**: <how>
+5. **Verify**: <how>
+6. **Rollback plan**: <how>
+7. **Audit**: <how>
 
-### What OCSP stapling buys you (2-3 sentences)
+### What OCSP stapling buys you (2-3 sentences, reference Reading 11)
 Why is OCSP stapling useful for production but not for a self-signed lab cert?
-Reference Lecture 8 (signing/verification chain) — OCSP is the "fast revocation check"
-piece of the chain.
+```
+
+---
+
+## Bonus Task — Coraza WAF + OWASP CRS (2 pts)
+
+> 🌟 **Genuinely valuable.** Reading 11 covered "WAF: The Next Layer". This bonus deploys it. A WAF sidecar catches **categories of attacks Nginx alone passes** — SQL injection probes, XSS payloads, path-traversal attempts. You'll demonstrate the difference.
+
+**Objective:** Drop **Coraza** (Apache 2.0 OSS, Caddy/Envoy/standalone) with **OWASP Core Rule Set** in front of Nginx. Send a payload that Nginx alone proxies happily but Coraza blocks. Read the WAF audit log to confirm which rule fired.
+
+### B.1: Add a Coraza sidecar
+
+Create `labs/lab11/waf/docker-compose.override.yml`:
+
+```yaml
+# YOUR TASK: Coraza WAF + OWASP CRS in front of Nginx
+#
+# Two valid approaches — pick one:
+#   (a) Standalone Coraza Server (coraza-spoa or coraza-server) as an SPOA filter
+#       in front of Nginx — moderate ops complexity
+#   (b) Caddy with the coraza module + OWASP CRS rules — easier, swap Nginx out
+#       (but loses your Task 1+2 nginx.conf work)
+#   (c) ModSecurity v3 + connector-nginx (the legacy alternative) — most documentation;
+#       slightly heavier than Coraza
+#
+# For this bonus, pick (c) ModSecurity v3 because the OWASP CRS docs are richer:
+# https://owasp.org/www-project-modsecurity-core-rule-set/
+#
+# Requirements:
+#   - Service called `waf` (or extend nginx with the ModSec dynamic module)
+#   - OWASP CRS v4.x installed
+#   - paranoia_level = 1 (production-safe starting point)
+#   - SecRuleEngine On (not DetectionOnly — we want it to block)
+#   - Audit log to /var/log/modsec/audit.log
+```
+
+> **Why ModSecurity v3 over Coraza?** Coraza is the modern Go-based reimplementation, ~70% feature-parity with ModSec v3 as of 2026 and growing. For this lab either works; the OWASP CRS documentation has more ModSec examples, so ModSec is the gentler entry point. Note this in your submission either way.
+
+### B.2: Bring up the WAF + Nginx + Juice Shop stack
+
+```bash
+cd labs/lab11
+docker compose -f docker-compose.yml -f waf/docker-compose.override.yml up -d
+docker compose ps    # WAF + nginx + juice all Up
+```
+
+### B.3: Probe with a malicious payload
+
+```bash
+# Baseline: through Nginx-only (Task 1 stack) — should reach Juice Shop and return 200/4xx
+# but no blocking
+curl -sk -o /dev/null -w "no-waf: HTTP %{http_code}\n" \
+  "https://localhost/rest/products/search?q='%20OR%201=1--"
+
+# Through WAF: should return 403 (Forbidden) per OWASP CRS Inbound Anomaly Score
+curl -sk -o /dev/null -w "with-waf: HTTP %{http_code}\n" \
+  "https://localhost-waf/rest/products/search?q='%20OR%201=1--"
+# (or whatever endpoint your WAF stack exposes)
+```
+
+### B.4: Inspect the audit log
+
+```bash
+docker compose exec waf cat /var/log/modsec/audit.log | tail -50 \
+  > labs/lab11/results/waf-audit.txt
+# Look for the rule ID that fired — typically 942100 (SQL Injection Attack: Common Injection Testing) or 942130-942260
+```
+
+### B.5: Document in `submissions/lab11.md`
+
+```markdown
+## Bonus: WAF Sidecar with OWASP CRS
+
+### Setup choice
+- WAF used: <Coraza / ModSecurity v3 / Caddy+Coraza>
+- OWASP CRS version: <4.x>
+- Paranoia level: 1
+
+### Attack payload sent
+`GET /rest/products/search?q=' OR 1=1--` (URL-encoded)
+
+### Before WAF (Nginx alone)
+```
+no-waf: HTTP 200    # or whatever Juice Shop returns; the point is no block
+```
+
+### After WAF
+```
+with-waf: HTTP 403
+```
+
+### Audit log excerpt (the rule that fired)
+```
+<paste 10-20 lines from waf-audit.txt showing the rule ID + matched value>
+```
+Rule ID: **<e.g. 942100>** — OWASP CRS rule name: **<e.g. SQL Injection Attack: Common Injection Testing>**
+
+### Tradeoff analysis (3 sentences)
+What does the WAF buy you that Lecture 5's SAST + DAST + the L7 Conftest gate didn't already?
+What does it COST you? (FP risk at higher paranoia levels; ops overhead; cert/config sprawl.)
+When would you NOT deploy a WAF in front of a service?
 ```
 
 ---
@@ -307,43 +352,48 @@ piece of the chain.
 
 ```bash
 git add labs/lab11/reverse-proxy/nginx.conf
+git add labs/lab11/waf/                    # Bonus only
 git add submissions/lab11.md
-git commit -m "feat(lab11): hardened nginx reverse proxy in front of juice shop"
+git commit -m "feat(lab11): hardened nginx + WAF sidecar"
 git push -u origin feature/lab11
 
 # Cleanup
 cd labs/lab11
-docker compose down
+docker compose -f docker-compose.yml -f waf/docker-compose.override.yml down
 cd -
 ```
-
-> **Do NOT commit** `labs/lab11/reverse-proxy/certs/` — keys + certs should be gitignored. Submission paste-ins are the evidence.
 
 PR checklist body:
 
 ```text
-- [x] Task 1 — TLS 1.3 + 6 security headers + rate limit + timeouts (all with proof)
-- [ ] Task 2 — Cipher list + session config + cert-rotation runbook
+- [x] Task 1 — TLS 1.3 + 6 security headers (with proof)
+- [ ] Task 2 — Rate limit + timeouts + cipher hardening + cert-rotation runbook
+- [ ] Bonus — Coraza/ModSec WAF + OWASP CRS catching a payload Nginx-alone passes
 ```
 
 ---
 
 ## Acceptance Criteria
 
-### Task 1 (6 pts)
-- ✅ HTTPS serves; HTTP → HTTPS 301 redirect works
+### Task 1 (4 pts)
+- ✅ HTTPS serves; HTTP → HTTPS 301 or 308 redirect works
 - ✅ TLS 1.3 negotiated (`openssl s_client -tls1_3` succeeds)
 - ✅ All 6 security headers present (HSTS, X-CTO, X-FO, Referrer-Policy, Permissions-Policy, CSP)
-- ✅ Rate limit demonstrably returns 429 on >10 req/s sustained load
-- ✅ Slowloris-style request triggers timeout (408 or connection close)
 - ✅ Each header's purpose explained in 1 sentence (no copy-paste from Mozilla docs)
 
 ### Task 2 (4 pts)
-- ✅ `ssl_ciphers` configured to TLS 1.3 suite (no fallback to TLS 1.2 ciphers)
-- ✅ `ssl_ecdh_curve` includes X25519
-- ✅ Session resumption configured (`ssl_session_cache shared`)
-- ✅ Cert rotation runbook has all 7 steps (detect → order → validate → deploy → verify → rollback → audit)
+- ✅ Rate limit demonstrably returns 429 on >10 req/min sustained load
+- ✅ Slowloris-style request triggers timeout (408 or connection close)
+- ✅ TLS 1.3 cipher suite + X25519 curve in use (verified with `openssl s_client`)
+- ✅ Cert-rotation runbook has all 7 steps (detect → order → validate → deploy → verify → rollback → audit)
 - ✅ OCSP-stapling explanation references the production-vs-lab gap honestly
+
+### Bonus Task (2 pts)
+- ✅ WAF stack runs (Coraza, ModSec, or Caddy+Coraza); choice documented
+- ✅ OWASP CRS v4.x installed; paranoia level documented
+- ✅ Same payload that Nginx-alone passes returns 403 through WAF
+- ✅ Audit log excerpt shows the OWASP CRS rule ID that fired
+- ✅ Tradeoff analysis covers what-WAF-buys, FP risk, when-not-to-deploy
 
 ---
 
@@ -351,9 +401,10 @@ PR checklist body:
 
 | Task | Points | Criteria |
 |------|-------:|----------|
-| **Task 1** — TLS + headers + rate limit | **6** | All 5 controls with proof + per-header explanation |
-| **Task 2** — Production posture | **4** | Cipher hardening + 7-step rotation runbook + OCSP explanation |
-| **Total** | **10** | (No bonus row — this IS the bonus lab) |
+| **Task 1** — TLS + headers | **4** | HTTPS redirect + TLS 1.3 + 6 headers with proof + per-header explanation |
+| **Task 2** — Production posture | **4** | Rate limit + timeout + cipher hardening + 7-step rotation runbook + OCSP explanation |
+| **Bonus Task** — WAF + OWASP CRS | **2** | Stack runs + payload blocked + audit log shows specific rule + tradeoff analysis |
+| **Total** | **10** | Task 1 + Task 2 + Bonus |
 
 ---
 
@@ -362,36 +413,41 @@ PR checklist body:
 <details>
 <summary>📚 Documentation</summary>
 
-- [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/) — Pick "Modern", paste output, adjust
-- [Nginx official `ssl_*` directives](https://nginx.org/en/docs/http/ngx_http_ssl_module.html) — Authoritative reference
-- [OWASP Secure Headers Project](https://owasp.org/www-project-secure-headers/) — Defends-against descriptions
-- [Mozilla Web Security Cheatsheet](https://infosec.mozilla.org/guidelines/web_security) — Per-header reasoning
-- [Let's Encrypt + certbot](https://certbot.eff.org/) — For real cert rotation
+- [Reading 11](../lectures/reading11.md) — the deep-dive companion to this lab
+- [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/) — Pick "Modern"
+- [Nginx official `ssl_*` directives](https://nginx.org/en/docs/http/ngx_http_ssl_module.html)
+- [OWASP ModSecurity Core Rule Set](https://coreruleset.org/) — the WAF rules
+- [Coraza documentation](https://coraza.io/docs/) — modern Go-based ModSec alternative
+- [ModSecurity v3 + nginx-connector](https://github.com/owasp-modsecurity/ModSecurity-nginx)
+- [Caddy + Coraza module](https://github.com/corazawaf/coraza-caddy) — the easiest WAF-with-batteries-included path
 
 </details>
 
 <details>
 <summary>⚠️ Common Pitfalls</summary>
 
-- 🚨 **`curl: (60) SSL certificate problem`** — your cert is self-signed. Use `-k` (insecure) flag for testing. In real production, the cert chain to a public CA root is what makes `curl` happy without `-k`.
-- 🚨 **`add_header` directives disappear on 5xx responses** — always use the `always` keyword: `add_header Strict-Transport-Security "..." always;`.
-- 🚨 **TLS 1.3 negotiation falls back to TLS 1.2** — you forgot `ssl_protocols TLSv1.3;` (without the `TLSv1.2` fallback). Some testing tools auto-fall-back; check `openssl s_client -tls1_3` explicitly.
-- 🚨 **Rate limit always returns 503 instead of 429** — Nginx returns 503 by default. Set `limit_req_status 429;` in the http{} block.
-- 🚨 **`docker compose up` fails with "host port already in use" on 80 or 443** — kill local Apache/nginx/other-proxy first: `sudo systemctl stop apache2 nginx`. Or remap to 8080/8443 in compose.
-- 🚨 **CSP `default-src 'self'` breaks Juice Shop frontend** — Juice Shop loads inline scripts + remote fonts; full CSP requires extensive testing. For the lab, demonstrate it WORKS at strict; document the relax-as-needed approach for real deployments.
-- 💡 **`testssl.sh`** is the industry-standard TLS posture tool. Install it (`brew install testssl`) and run `testssl.sh localhost:443` for a free A+ assessment.
+- 🚨 **`curl: (60) SSL certificate problem`** — your cert is self-signed. Use `-k` (insecure) flag for testing.
+- 🚨 **`add_header` directives disappear on 5xx responses** — always use the `always` keyword.
+- 🚨 **TLS 1.3 negotiation falls back to TLS 1.2** — verify with explicit `openssl s_client -tls1_3`.
+- 🚨 **Rate limit returns 503 instead of 429** — set `limit_req_status 429;` in the `http {}` block.
+- 🚨 **`docker compose up` fails with port-already-in-use on 80/443** — kill local nginx/Apache first, OR remap ports in `docker-compose.yml`.
+- 🚨 **Cert file names** — the nginx.conf expects `/etc/nginx/certs/localhost.crt` and `localhost.key`. Use those exact names.
+- 🚨 **CSP `default-src 'self'` breaks Juice Shop frontend** — Juice Shop loads inline scripts + remote fonts. Use `Content-Security-Policy-Report-Only` for the lab; tighten iteratively in real deployments.
+- 🚨 **WAF paranoia 4 blocks everything** — start at paranoia 1, watch the audit log for legitimate traffic flagged, then escalate.
+- 🚨 **WAF audit log empty** — `SecAuditLogParts ABIJDEFHZ` (or similar) must be in the modsecurity.conf; default config sometimes omits the request body parts.
+- 💡 **`testssl.sh localhost:443`** is the industry-standard TLS posture tool — run it for a free A-F grade against your config.
 
 </details>
 
 <details>
 <summary>🪜 Looking outside this course</summary>
 
-The hardened proxy you built here is **production-grade** for a single-domain deployment:
+The hardened proxy + WAF stack you built here is **production-grade**:
 - Add Let's Encrypt + certbot for real cert automation
-- Add `fail2ban` + Nginx access log scraping for IP-based abuse blocking
-- Add ModSecurity + OWASP Core Rule Set for a real WAF layer
-- For multi-domain / cluster deployments: Envoy or Traefik often replace Nginx
+- Add `fail2ban` + Nginx access log scraping for IP-based abuse blocking (lighter than WAF, complementary)
+- For multi-domain / cluster: Envoy or Traefik often replace Nginx; both support OWASP CRS via plugins
+- For cloud: AWS WAF + Cloudflare WAF give you a managed CRS without the ops overhead
 
-Add this to your portfolio walkthrough (Lab 10 bonus) — "I built a hardened reverse proxy with the full security-header set, rate limiting, and TLS 1.3" is a strong interview line.
+"I deployed a WAF with OWASP CRS in front of Juice Shop and watched it stop SQL injection attempts" is a strong interview line.
 
 </details>

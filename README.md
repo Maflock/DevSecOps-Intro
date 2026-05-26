@@ -1,7 +1,7 @@
 # DevSecOps Intro — Security as Code, From SDLC to Runtime
 
 ![labs](https://img.shields.io/badge/Main_Labs-70%25-blue)
-![bonus](https://img.shields.io/badge/Bonuses_+_Bonus_Labs-44%25-yellow)
+![bonus](https://img.shields.io/badge/Bonuses_+_Bonus_Labs-34%25-yellow)
 ![exam](https://img.shields.io/badge/Exam-30%25-green)
 ![focus](https://img.shields.io/badge/Focus-Hands--On-orange)
 ![duration](https://img.shields.io/badge/Duration-10%20Weeks-informational)
@@ -28,8 +28,8 @@ The course follows a **map → discover → write → ship → scan → harden �
 | 8 | Lab 8 | Supply Chain | Cosign v3 sign + verify + tamper demo, SBOM/SLSA attestations, `cosign sign-blob` |
 | 9 | Lab 9 | Runtime + PaC | Falco (modern eBPF), custom rules, Conftest/Rego policies at CI time |
 | 10 | Lab 10 | Vulnerability Management | DefectDojo capstone — import all prior labs, dedup, SLA matrix, MTTR/age, 5-min walkthrough |
-| — | Lab 11 | Edge Hardening *(bonus)* | Nginx TLS 1.3, full security-header set, rate limiting, cert rotation |
-| — | Lab 12 | VM Sandboxing *(bonus)* | Kata Containers, runc vs VM isolation, perf benchmark |
+| — | Lab 11 | Edge Hardening *(bonus)* | Nginx TLS 1.3, security headers, rate limiting, cert rotation; bonus: Coraza WAF + OWASP CRS |
+| — | Lab 12 | VM Sandboxing *(bonus)* | Kata Containers, runc-vs-VM isolation, perf benchmark; bonus: real container-escape PoC blocked by Kata |
 
 ---
 
@@ -148,7 +148,7 @@ Each main lab (Labs 1-10) caps at **12 pts = 10 main + 2 bonus**.
 
 A student who only completes Task 1 across all 10 labs ends with a working DevSecOps pipeline — just not all the deeper-dive controls.
 
-**Bonus labs (11 + 12)** have a different shape: **Task 1 + Task 2 only**, 10 pts total, **no separate Bonus Task row**. The labs themselves *are* the bonus extension work and count toward a separate 30% weight (see grading below).
+**Bonus labs (11 + 12)** have a tighter shape: **Task 1 (4 pts) + Task 2 (4 pts) + Bonus Task (2 pts) = 10 pts total** (vs main labs' 12). The labs are bonus-track in the sense that they're not on the critical path; the Bonus Task inside each lab is still the genuinely-challenging extension. Bonus labs count toward a separate 20% weight (see grading below).
 
 ### Submission Workflow
 
@@ -172,22 +172,22 @@ Submissions are **CLI output + brief analysis**, not source code. Paste the comm
 
 ## Grading
 
-Five components. Their max contributions sum to **149%** but the grade is **capped at 100%** — multiple paths to A; no single mandatory path.
+Five components. Their max contributions sum to **139%** but the grade is **capped at 100%** — multiple paths to A; no single mandatory path.
 
 | Component | Raw Points | Weight | What it rewards |
 |-----------|-----------:|-------:|-----------------|
 | **Main labs 1-10** (Task 1 + Task 2 + Task 3 where applicable) | 100 | **70%** | Diligent project work — the floor for any serious student |
 | **Bonus tasks 1-10** (2 pts each, flat — no difficulty weighting) | 20 | **14%** | Going above and beyond on weekly topics |
 | **Quiz leaderboards** (5 rolling per-2-labs leaderboards, top-10 share 1% pool each) | — | **up to 5%** | Engagement + excellence; rewards late-joining students too |
-| **Bonus labs 11 + 12** (Task 1 + Task 2 only — 10 pts each) | 20 | **30%** | Mastering edge hardening + VM-backed isolation |
+| **Bonus labs 11 + 12** (Task 1 + Task 2 + Bonus = 10 pts each) | 20 | **20%** | Edge hardening + VM-backed isolation |
 | **Final exam** | — | **30%** | Optional path — written, comprehensive |
-| **Sum (capped at 100%)** | | **149%** | |
+| **Sum (capped at 100%)** | | **139%** | |
 
 ### Paths to A
 
 Two real paths to A (≥90%):
 
-- **Practice path:** all main labs + bonuses + at least one bonus lab → ≥90%. No exam required.
+- **Practice path:** all main labs + bonuses + both bonus labs → ≥90%. No exam required.
 - **Exam path:** all main labs + bonuses + decent exam → ≥90%. No bonus labs required.
 
 Sample scores:
@@ -198,7 +198,8 @@ Sample scores:
 | All Task 1+2, no bonuses | 70% | 0% | 0% | 0% | 0% | **70%** |
 | Add all weekly bonuses | 70% | 14% | 0% | 0% | 0% | **84%** |
 | + good quiz | 70% | 14% | 0% | 0% | 5% | **89%** ← *just short of A* |
-| + finish one bonus lab | 70% | 14% | 15% | 0% | 5% | **100%** (capped) |
+| + finish one bonus lab | 70% | 14% | 10% | 0% | 5% | **99%** ← *A territory* |
+| + both bonus labs | 70% | 14% | 20% | 0% | 5% | **100%** (capped) |
 | Take the exam instead | 70% | 14% | 0% | 25% | 5% | **100%** (capped) |
 
 **The deliberate design:** `Main + lab-bonuses + quiz` alone tops out at **89% → just short of A**. To earn A you must do at least one bonus lab OR the exam. Stops "easy A from quiz padding."
