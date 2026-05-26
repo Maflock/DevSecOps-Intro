@@ -1,568 +1,363 @@
-# Lab 6 — Infrastructure-as-Code Security: Scanning & Policy Enforcement
+# Lab 6 — IaC Security: Checkov + KICS + a Custom Policy
 
-![difficulty](https://img.shields.io/badge/difficulty-intermediate-orange)
+![difficulty](https://img.shields.io/badge/difficulty-intermediate-yellow)
 ![topic](https://img.shields.io/badge/topic-IaC%20Security-blue)
-![points](https://img.shields.io/badge/points-10-orange)
+![points](https://img.shields.io/badge/points-10%2B2-orange)
+![tech](https://img.shields.io/badge/tech-Checkov%20%2B%20KICS-informational)
 
-> **Goal:** Perform security analysis on vulnerable Infrastructure-as-Code using multiple scanning tools (tfsec, Checkov, Terrascan for Terraform; KICS for Pulumi and Ansible) and conduct comparative analysis to identify misconfigurations and security issues.  
-> **Deliverable:** A PR from `feature/lab6` to the course repo with `labs/submission6.md` containing IaC security findings, tool comparison analysis, and security insights. Submit the PR link via Moodle.
+> **Goal:** Scan vulnerable Terraform + Pulumi with Checkov, scan vulnerable Ansible with KICS, then (bonus) write a custom Checkov policy for a project-specific rule.
+> **Deliverable:** A PR from `feature/lab6` with `submissions/lab6.md` (findings tables + analysis) and (bonus) a custom Checkov policy file. Submit PR link via Moodle.
 
 ---
 
 ## Overview
 
 In this lab you will practice:
-- Scanning **Terraform** infrastructure code with multiple security tools (tfsec, Checkov, Terrascan)
-- Analyzing **Pulumi** infrastructure code with **KICS (Checkmarx)**, an open-source scanner with first-class Pulumi YAML support
-- Scanning **Ansible** playbooks with **KICS** for security issues and misconfigurations
-- Comparing different IaC security scanners to evaluate their effectiveness
-- Analyzing critical security vulnerabilities and developing remediation strategies
-- Recommending tool selection strategies for real-world DevSecOps pipelines
+- **Checkov 3.x** on Terraform + Pulumi (~2,500 built-in policies, including 800+ graph-based) — Lecture 6
+- **KICS** on Ansible (~2,400 Rego-based queries) — Lecture 6
+- **Triage at the module level** (Lecture 6 slide 17 — one fix at module level closes many findings)
+- (Bonus) Writing a **custom Checkov policy** in YAML for a project-specific rule
 
-These skills are essential for shift-left security in infrastructure deployment and DevSecOps automation.
-
-> You will work with intentionally vulnerable Terraform, Pulumi, and Ansible code provided in the course repository to practice identifying and fixing security misconfigurations.
+> Plumbing in `labs/lab6/vulnerable-iac/` contains deliberately misconfigured IaC across all three formats. Don't fix the files — analyze them.
 
 ---
 
-## Tasks
+## Project State
 
-### Task 1 — Terraform & Pulumi Security Scanning (5 pts)
+**You should have from Labs 1-5:**
+- A working `feature/labN` PR workflow + signed commits + pre-commit secret scanning
+- A general feel for "static text → security findings" from Lab 5's SAST work
 
-**Objective:** Scan vulnerable Terraform and Pulumi configurations using multiple security tools to compare effectiveness and identify infrastructure security issues.
-
-#### 1.1: Setup Scanning Environment
-
-1. **Prepare Analysis Directory:**
-
-   ```bash
-   # Create analysis directory for all scan results
-   mkdir -p labs/lab6/analysis
-   ```
-
-<details>
-<summary>Vulnerable IaC Code Structure</summary>
-
-**Location:** `labs/lab6/vulnerable-iac/`
-
-**Terraform code** (`labs/lab6/vulnerable-iac/terraform/`):
-- `main.tf` - AWS infrastructure with public S3 buckets, hardcoded credentials
-- `security_groups.tf` - Overly permissive security rules (0.0.0.0/0)
-- `database.tf` - Unencrypted RDS instances, public databases
-- `iam.tf` - Wildcard IAM permissions, privilege escalation
-- `variables.tf` - Insecure default values, hardcoded secrets
-
-**Pulumi code** (`labs/lab6/vulnerable-iac/pulumi/`):
-- `__main__.py` - Python-based infrastructure with 21 security issues
-- `Pulumi.yaml` - Configuration with default secret values
-- `Pulumi-vulnerable.yaml` - YAML-based Pulumi manifest (for KICS scanning)
-- Includes: public S3, open security groups, unencrypted databases
-
-**Ansible code** (`labs/lab6/vulnerable-iac/ansible/`):
-- `deploy.yml` - Hardcoded secrets, poor command execution
-- `configure.yml` - Weak SSH config, security misconfigurations
-- `inventory.ini` - Credentials in plaintext
-
-**Total: 80+ intentional security vulnerabilities across all frameworks**
-
-> **Note:** Pulumi code includes both Python and YAML formats. KICS is used for Pulumi scanning due to its first-class support for Pulumi YAML manifests and comprehensive query catalog.
-
-</details>
-
-#### 1.2: Scan with tfsec
-
-1. **Run tfsec Security Scanner:**
-
-   ```bash
-   # Scan Terraform code with tfsec (JSON output)
-   docker run --rm -v "$(pwd)/labs/lab6/vulnerable-iac/terraform":/src \
-     aquasec/tfsec:latest /src \
-     --format json > labs/lab6/analysis/tfsec-results.json
-
-   # Generate readable report
-   docker run --rm -v "$(pwd)/labs/lab6/vulnerable-iac/terraform":/src \
-     aquasec/tfsec:latest /src > labs/lab6/analysis/tfsec-report.txt
-   ```
-
-#### 1.3: Scan with Checkov
-
-1. **Run Checkov Security Scanner:**
-
-   ```bash
-   # Scan with Checkov (JSON output)
-   docker run --rm -v "$(pwd)/labs/lab6/vulnerable-iac/terraform":/tf \
-     bridgecrew/checkov:latest \
-     -d /tf --framework terraform \
-     -o json > labs/lab6/analysis/checkov-terraform-results.json
-
-   # Generate readable report
-   docker run --rm -v "$(pwd)/labs/lab6/vulnerable-iac/terraform":/tf \
-     bridgecrew/checkov:latest \
-     -d /tf --framework terraform \
-     --compact > labs/lab6/analysis/checkov-terraform-report.txt
-   ```
-
-#### 1.4: Scan with Terrascan
-
-1. **Run Terrascan Security Scanner:**
-
-   ```bash
-   # Scan with Terrascan (JSON output)
-   docker run --rm -v "$(pwd)/labs/lab6/vulnerable-iac/terraform":/iac \
-     tenable/terrascan:latest scan \
-     -i terraform -d /iac \
-     -o json > labs/lab6/analysis/terrascan-results.json
-
-   # Generate readable report
-   docker run --rm -v "$(pwd)/labs/lab6/vulnerable-iac/terraform":/iac \
-     tenable/terrascan:latest scan \
-     -i terraform -d /iac \
-     -o human > labs/lab6/analysis/terrascan-report.txt
-   ```
-
-#### 1.5: Terraform Scanning Analysis
-
-1. **Compare Tool Results:**
-
-   ```bash
-   echo "=== Terraform Security Analysis ===" > labs/lab6/analysis/terraform-comparison.txt
-   
-   # Count findings from each tool
-   tfsec_count=$(jq '.results | length' labs/lab6/analysis/tfsec-results.json 2>/dev/null || echo "0")
-   checkov_count=$(jq '.summary.failed' labs/lab6/analysis/checkov-terraform-results.json 2>/dev/null || echo "0")
-   terrascan_count=$(jq '.results.scan_summary.violated_policies' labs/lab6/analysis/terrascan-results.json 2>/dev/null || echo "0")
-   
-   echo "tfsec findings: $tfsec_count" >> labs/lab6/analysis/terraform-comparison.txt
-   echo "Checkov findings: $checkov_count" >> labs/lab6/analysis/terraform-comparison.txt
-   echo "Terrascan findings: $terrascan_count" >> labs/lab6/analysis/terraform-comparison.txt
-   ```
-
-#### 1.6: Scan Pulumi Code with KICS
-
-1. **Scan Pulumi with KICS (Checkmarx):**
-
-   KICS provides first-class Pulumi support and scans Pulumi YAML manifests directly. It includes a comprehensive catalog of Pulumi-specific security queries for AWS, Azure, GCP, and Kubernetes resources.
-
-   ```bash
-   # Scan Pulumi with KICS (JSON and HTML reports)
-   docker run -t --rm -v "$(pwd)/labs/lab6/vulnerable-iac/pulumi":/src \
-     checkmarx/kics:latest \
-     scan -p /src -o /src/kics-report --report-formats json,html
-
-   # Move reports to analysis directory
-   sudo mv labs/lab6/vulnerable-iac/pulumi/kics-report/results.json labs/lab6/analysis/kics-pulumi-results.json
-   sudo mv labs/lab6/vulnerable-iac/pulumi/kics-report/results.html labs/lab6/analysis/kics-pulumi-report.html
-
-   # Generate readable summary (console output)
-   docker run -t --rm -v "$(pwd)/labs/lab6/vulnerable-iac/pulumi":/src \
-     checkmarx/kics:latest \
-     scan -p /src --minimal-ui > labs/lab6/analysis/kics-pulumi-report.txt 2>&1 || true
-   ```
-
-2. **Analyze Pulumi Results:**
-
-   ```bash
-   echo "=== Pulumi Security Analysis (KICS) ===" > labs/lab6/analysis/pulumi-analysis.txt
-   
-   # KICS JSON structure: queries_total, queries_failed (vulnerabilities found)
-   high_severity=$(jq '.severity_counters.HIGH // 0' labs/lab6/analysis/kics-pulumi-results.json 2>/dev/null || echo "0")
-   medium_severity=$(jq '.severity_counters.MEDIUM // 0' labs/lab6/analysis/kics-pulumi-results.json 2>/dev/null || echo "0")
-   low_severity=$(jq '.severity_counters.LOW // 0' labs/lab6/analysis/kics-pulumi-results.json 2>/dev/null || echo "0")
-   total_findings=$(jq '.total_counter // 0' labs/lab6/analysis/kics-pulumi-results.json 2>/dev/null || echo "0")
-   
-   echo "KICS Pulumi findings: $total_findings" >> labs/lab6/analysis/pulumi-analysis.txt
-   echo "  HIGH severity: $high_severity" >> labs/lab6/analysis/pulumi-analysis.txt
-   echo "  MEDIUM severity: $medium_severity" >> labs/lab6/analysis/pulumi-analysis.txt
-   echo "  LOW severity: $low_severity" >> labs/lab6/analysis/pulumi-analysis.txt
-   ```
-
-In `labs/submission6.md`, document:
-- **Terraform Tool Comparison** - Effectiveness of tfsec vs. Checkov vs. Terrascan
-- **Pulumi Security Analysis** - Findings from KICS on Pulumi code
-- **Terraform vs. Pulumi** - Compare security issues between declarative HCL and programmatic YAML approaches
-- **KICS Pulumi Support** - Evaluate KICS's Pulumi-specific query catalog
-- **Critical Findings** - At least 5 significant security issues
-- **Tool Strengths** - What each tool excels at detecting
+**This lab adds:**
+- Checkov + KICS scan reports across three IaC formats
+- A custom Checkov policy in your fork (the bonus)
 
 ---
 
-### Task 2 — Ansible Security Scanning with KICS (2 pts)
+## Setup
 
-**Objective:** Scan vulnerable Ansible playbooks using KICS to identify security issues, misconfigurations, and best practice violations.
+You need:
+- **Docker** (for KICS, optionally Checkov)
+- **Python 3.10+** + **pip**
+- **`jq`**
 
-#### 2.1: Scan Ansible Playbooks with KICS
+```bash
+git switch main && git pull
+git switch -c feature/lab6
 
-<details>
-<summary>Vulnerable Ansible Code Structure</summary>
+# Install Checkov (course pins 3.x)
+pip install checkov
 
-The provided Ansible code includes common security issues:
-- `deploy.yml` - Playbook with hardcoded secrets
-- `configure.yml` - Tasks without `no_log` for sensitive operations
-- `inventory.ini` - Insecure inventory configuration
+# Verify
+checkov --version
+docker --version
 
-KICS provides comprehensive Ansible security queries for:
-- Secrets management issues
-- Command execution vulnerabilities
-- File permissions and access control
-- Authentication and access issues
-- Insecure configurations
+# Examine the vulnerable IaC (don't fix it — that's the lecture exercise)
+ls labs/lab6/vulnerable-iac/{terraform,pulumi,ansible}
 
-</details>
+mkdir -p labs/lab6/results
+```
 
-1. **Run KICS Security Scanner for Ansible:**
-
-   KICS auto-detects Ansible playbooks and applies Ansible-specific security queries:
-
-   ```bash
-   # Scan Ansible playbooks with KICS (JSON and HTML reports)
-   docker run -t --rm -v "$(pwd)/labs/lab6/vulnerable-iac/ansible":/src \
-     checkmarx/kics:latest \
-     scan -p /src -o /src/kics-report --report-formats json,html
-
-   # Move reports to analysis directory
-   sudo mv labs/lab6/vulnerable-iac/ansible/kics-report/results.json labs/lab6/analysis/kics-ansible-results.json
-   sudo mv labs/lab6/vulnerable-iac/ansible/kics-report/results.html labs/lab6/analysis/kics-ansible-report.html
-
-   # Generate readable summary
-   docker run -t --rm -v "$(pwd)/labs/lab6/vulnerable-iac/ansible":/src \
-     checkmarx/kics:latest \
-     scan -p /src --minimal-ui > labs/lab6/analysis/kics-ansible-report.txt 2>&1 || true
-   ```
-
-#### 2.2: Ansible Security Analysis
-
-1. **Analyze KICS Ansible Results:**
-
-   ```bash
-   echo "=== Ansible Security Analysis (KICS) ===" > labs/lab6/analysis/ansible-analysis.txt
-   
-   # Count findings by severity
-   high_severity=$(jq '.severity_counters.HIGH // 0' labs/lab6/analysis/kics-ansible-results.json 2>/dev/null || echo "0")
-   medium_severity=$(jq '.severity_counters.MEDIUM // 0' labs/lab6/analysis/kics-ansible-results.json 2>/dev/null || echo "0")
-   low_severity=$(jq '.severity_counters.LOW // 0' labs/lab6/analysis/kics-ansible-results.json 2>/dev/null || echo "0")
-   total_findings=$(jq '.total_counter // 0' labs/lab6/analysis/kics-ansible-results.json 2>/dev/null || echo "0")
-   
-   echo "KICS Ansible findings: $total_findings" >> labs/lab6/analysis/ansible-analysis.txt
-   echo "  HIGH severity: $high_severity" >> labs/lab6/analysis/ansible-analysis.txt
-   echo "  MEDIUM severity: $medium_severity" >> labs/lab6/analysis/ansible-analysis.txt
-   echo "  LOW severity: $low_severity" >> labs/lab6/analysis/ansible-analysis.txt
-   ```
-
-In `labs/submission6.md`, document:
-- **Ansible Security Issues** - Key security problems identified by KICS
-- **Best Practice Violations** - Explain at least 3 violations and their security impact
-- **KICS Ansible Queries** - Evaluate the types of security checks KICS performs
-- **Remediation Steps** - How to fix the identified issues
+> **Plumbing provided** (in `labs/lab6/vulnerable-iac/`):
+> - `terraform/` — deliberately misconfigured AWS resources (S3, IAM, RDS, EKS)
+> - `pulumi/` — deliberately misconfigured GCP resources (Python Pulumi)
+> - `ansible/` — deliberately misconfigured Linux hardening playbook
+> - `README.md` — documents which CKV_* / KICS rules each file targets
 
 ---
 
-### Task 3 — Comparative Tool Analysis & Security Insights (3 pts)
+## Task 1 — Checkov on Terraform (6 pts)
 
-**Objective:** Analyze and compare the effectiveness of different IaC security scanning tools to understand their strengths and weaknesses, and develop insights for tool selection in real-world scenarios.
+**Objective:** Scan the Terraform sample with Checkov; identify findings; group by module/rule frequency to find the highest-leverage fixes.
 
-#### 3.1: Create Comprehensive Tool Comparison
+> **Why Terraform-only for Checkov?** Pulumi is real Python; Checkov 3.x does not have a `pulumi` framework directly (it expects rendered state via `pulumi preview --json` OR the SAST-Python framework). To keep the lab's tool surface manageable, **Pulumi is scanned with KICS** in Task 2 (which natively understands Pulumi source). You'll see the trade-off live: tool ecosystems specialize differently.
 
-1. **Generate Summary Statistics:**
+### 6.1: Scan Terraform
 
-   ```bash
-   # Generate comprehensive comparison statistics
-   echo "=== Comprehensive Tool Comparison ===" > labs/lab6/analysis/tool-comparison.txt
-   
-   # Terraform tools
-   tfsec_count=$(jq '.results | length' labs/lab6/analysis/tfsec-results.json 2>/dev/null || echo "0")
-   checkov_tf_count=$(jq '.summary.failed' labs/lab6/analysis/checkov-terraform-results.json 2>/dev/null || echo "0")
-   terrascan_count=$(jq '.results.scan_summary.violated_policies' labs/lab6/analysis/terrascan-results.json 2>/dev/null || echo "0")
-   
-   # Pulumi tool
-   kics_pulumi_count=$(jq '.total_counter // 0' labs/lab6/analysis/kics-pulumi-results.json 2>/dev/null || echo "0")
-   
-   # Ansible tool
-   kics_ansible_count=$(jq '.total_counter // 0' labs/lab6/analysis/kics-ansible-results.json 2>/dev/null || echo "0")
-   
-   echo "Terraform Scanning Results:" >> labs/lab6/analysis/tool-comparison.txt
-   echo "  - tfsec: $tfsec_count findings" >> labs/lab6/analysis/tool-comparison.txt
-   echo "  - Checkov: $checkov_tf_count findings" >> labs/lab6/analysis/tool-comparison.txt
-   echo "  - Terrascan: $terrascan_count findings" >> labs/lab6/analysis/tool-comparison.txt
-   echo "" >> labs/lab6/analysis/tool-comparison.txt
-   echo "Pulumi Scanning Results (KICS): $kics_pulumi_count findings" >> labs/lab6/analysis/tool-comparison.txt
-   echo "Ansible Scanning Results (KICS): $kics_ansible_count findings" >> labs/lab6/analysis/tool-comparison.txt
-   ```
+```bash
+checkov -d labs/lab6/vulnerable-iac/terraform \
+  --output cli --output json \
+  --output-file-path labs/lab6/results/checkov-terraform/
+```
 
-2. **Create Tool Effectiveness Matrix:**
+### 6.2: Triage by rule frequency
 
-   In `labs/submission6.md`, create a comprehensive comparison table:
+```bash
+# Top 5 rule IDs by count (Lecture 6 slide 17 — module-level leverage)
+jq '[.results.failed_checks[].check_id] | group_by(.) | map({rule: .[0], count: length}) |
+    sort_by(-.count) | .[:5]' \
+  labs/lab6/results/checkov-terraform/results_json.json
 
-   | Criterion | tfsec | Checkov | Terrascan | KICS |
-   |-----------|-------|---------|-----------|------|
-   | **Total Findings** | # | # | # | # (Pulumi + Ansible) |
-   | **Scan Speed** | Fast/Medium/Slow | | | |
-   | **False Positives** | Low/Med/High | | | |
-   | **Report Quality** | ⭐-⭐⭐⭐⭐ | | | |
-   | **Ease of Use** | ⭐-⭐⭐⭐⭐ | | | |
-   | **Documentation** | ⭐-⭐⭐⭐⭐ | | | |
-   | **Platform Support** | Terraform only | Multiple | Multiple | Multiple |
-   | **Output Formats** | JSON, text, SARIF, etc | | | |
-   | **CI/CD Integration** | Easy/Medium/Hard | | | |
-   | **Unique Strengths** | | | | |
+# Severity breakdown
+jq '[.results.failed_checks[].severity] | group_by(.) | map({severity: .[0], count: length})' \
+  labs/lab6/results/checkov-terraform/results_json.json
+```
 
-#### 3.2: Vulnerability Category Analysis
+### 6.4: Document in `submissions/lab6.md`
 
-1. **Categorize Findings by Security Domain:**
+```markdown
+# Lab 6 — Submission
 
-   In `labs/submission6.md`, analyze tool performance across security categories:
+## Task 1: Checkov on Terraform + Pulumi
 
-   | Security Category | tfsec | Checkov | Terrascan | KICS (Pulumi) | KICS (Ansible) | Best Tool |
-   |------------------|-------|---------|-----------|---------------|----------------|----------|
-   | **Encryption Issues** | ? | ? | ? | ? | N/A | ? |
-   | **Network Security** | ? | ? | ? | ? | ? | ? |
-   | **Secrets Management** | ? | ? | ? | ? | ? | ? |
-   | **IAM/Permissions** | ? | ? | ? | ? | ? | ? |
-   | **Access Control** | ? | ? | ? | ? | ? | ? |
-   | **Compliance/Best Practices** | ? | ? | ? | ? | ? | ? |
+### Terraform scan
+- Total checks: <n>
+- Passed: <n>
+- Failed: <n>
 
-   **Instructions:**
-   - Review the JSON/HTML reports from each tool
-   - Count findings in each security category
-   - Identify which tools excel at detecting specific issue types
-   - Note unique findings detected by only one tool
+| Severity | Count |
+|----------|------:|
+| Critical | <n> |
+| High | <n> |
+| Medium | <n> |
+| Low | <n> |
 
-In `labs/submission6.md`, document:
-- **Tool Comparison Matrix** - Comprehensive evaluation with all metrics
-- **Category Analysis** - Tool performance across security domains
-- **Top 5 Critical Findings** - Detailed analysis with remediation code examples
-- **Tool Selection Guide** - Recommendations for different use cases
-- **Lessons Learned** - Insights about tool effectiveness, false positives, and limitations
-- **CI/CD Integration Strategy** - Practical multi-stage pipeline recommendations
-- **Justification** - Explain your reasoning for tool choices and strategy
+### Top 5 rule IDs (by frequency)
+| Rule ID | Count | What it checks |
+|---------|------:|----------------|
+| <CKV_AWS_*> | <n> | <1-line description> |
+
+### Pulumi scan
+| Severity | Count |
+|----------|------:|
+| ... |
+
+### Module-leverage analysis (Lecture 6 slide 17)
+Looking at your top-5 Terraform rules, which ONE fix would eliminate the most findings if applied
+at the module level? (2-3 sentences. e.g., "If the S3 module had `block_public_acls = true` as default,
+the 8 findings of CKV_AWS_56 would all go away.")
+```
 
 ---
 
-## Acceptance Criteria
+## Task 2 — KICS on Ansible + Pulumi (4 pts)
 
-- ✅ Branch `feature/lab6` exists with commits for each task.
-- ✅ File `labs/submission6.md` contains required analysis for Tasks 1-3.
-- ✅ Terraform scanned with tfsec, Checkov, and Terrascan.
-- ✅ Pulumi scanned with KICS (Checkmarx).
-- ✅ Ansible playbooks scanned with KICS (Checkmarx).
-- ✅ Comparative analysis completed with tool evaluation matrices.
-- ✅ All scan results and analysis outputs committed.
-- ✅ PR from `feature/lab6` → **course repo main branch** is open.
-- ✅ PR link submitted via Moodle before the deadline.
+> ⏭️ Optional. Skipping won't affect future labs.
+
+**Objective:** Run KICS against the Ansible playbook AND the Pulumi source; see how Rego-based queries surface different findings than Checkov, and demonstrate KICS's broader format coverage.
+
+### 6.5: Run KICS on Ansible
+
+```bash
+docker run --rm \
+  -v "$(pwd)/labs/lab6:/path" \
+  checkmarx/kics:latest \
+  scan -p /path/vulnerable-iac/ansible/ \
+       -o /path/results/kics-ansible/ \
+       --report-formats json,sarif
+```
+
+### 6.5b: Run KICS on Pulumi (natively supported)
+
+```bash
+docker run --rm \
+  -v "$(pwd)/labs/lab6:/path" \
+  checkmarx/kics:latest \
+  scan -p /path/vulnerable-iac/pulumi/ \
+       -o /path/results/kics-pulumi/ \
+       --report-formats json,sarif
+```
+
+### 6.6: Analyze
+
+```bash
+# Severity breakdown
+jq '[.queries[].severity] | group_by(.) | map({severity: .[0], count: length})' \
+  labs/lab6/results/kics/results.json
+
+# Top queries by impact
+jq '[.queries[] | {query: .query_name, severity, count: (.files | length)}] |
+    sort_by(-.count) | .[:5]' \
+  labs/lab6/results/kics/results.json
+```
+
+### 6.7: Document in `submissions/lab6.md`
+
+```markdown
+## Task 2: KICS on Ansible
+
+### Severity breakdown
+| Severity | Count |
+|----------|------:|
+| HIGH | <n> |
+| MEDIUM | <n> |
+| LOW | <n> |
+| INFO | <n> |
+
+### Top 5 KICS queries (by frequency)
+| Query | Severity | Files |
+|-------|----------|------:|
+| <name> | <sev> | <n> |
+
+### Checkov vs KICS — when to use which? (Lecture 6 slide 10)
+2-3 sentences each:
+- One thing Checkov did **better** for the Terraform sample
+- One thing KICS did **better** for the Ansible sample
+- (Optional) An example of a finding only ONE of them caught for the same resource type
+```
+
+---
+
+## Bonus Task — Custom Checkov Policy (2 pts)
+
+> 🌟 **Genuinely challenging.** Writing custom policies is how Policy-as-Code scales beyond what vendors ship.
+
+**Objective:** Write a custom Checkov policy in YAML (graph-based or single-resource — your choice). Apply it to the vulnerable Terraform sample and demonstrate it fires.
+
+### B.1: Pick a rule
+
+Pick a project-specific check that's NOT already in Checkov's built-in catalog. Examples:
+
+- "Every S3 bucket must have a `lifecycle_configuration` block"
+- "Every RDS instance must have `iam_database_authentication_enabled = true`"
+- "Every IAM policy attached to a Lambda must not have `Action: *` or `Resource: *`"
+- "Every CloudWatch log group must have `retention_in_days <= 365`"
+
+### B.2: Write the policy
+
+```yaml
+# labs/lab6/policies/my-custom-policy.yaml
+# YOUR TASK: Custom Checkov policy
+# Required structure:
+# metadata:
+#   id: CKV2_CUSTOM_1     # CKV_* for single-resource, CKV2_* for graph (cross-resource)
+#   name: <descriptive>
+#   category: <one of Checkov's standard categories>
+#   severity: HIGH | MEDIUM | LOW
+# definition:
+#   and:                  # or: or, not — Boolean composition
+#     - cond_type: filter | attribute | connection
+#       attribute: <field-path>
+#       value: <expected>
+#       operator: equals | within | exists | greater_than | ...
+#
+# See Checkov docs for the full schema:
+# https://www.checkov.io/3.Custom%20Policies/YAML%20Custom%20Policies.html
+```
+
+### B.3: Run Checkov with the custom policy
+
+```bash
+checkov -d labs/lab6/vulnerable-iac/terraform \
+  --external-checks-dir labs/lab6/policies \
+  --output cli --output json \
+  --output-file-path labs/lab6/results/checkov-custom/
+```
+
+### B.4: Verify your policy fires
+
+```bash
+# Look for your custom rule ID in the results
+jq '.results.failed_checks[] | select(.check_id | startswith("CKV2_CUSTOM_"))' \
+  labs/lab6/results/checkov-custom/results_json.json
+```
+
+### B.5: Document in `submissions/lab6.md`
+
+```markdown
+## Bonus: Custom Checkov Policy
+
+### Policy file (paste full contents of labs/lab6/policies/my-custom-policy.yaml)
+```yaml
+<paste>
+```
+
+### Rule fires
+Output of `jq '.results.failed_checks[] | select(.check_id | startswith("CKV2_CUSTOM_"))'`:
+```
+<paste — must show ≥1 failed check with YOUR rule ID>
+```
+
+### Why this rule matters
+2-3 sentences: what real-world incident or compliance requirement does your custom policy address?
+(References to specific incidents or NIST/CIS controls strengthen the answer.)
+```
 
 ---
 
 ## How to Submit
 
-1. Create a branch for this lab and push it to your fork:
+```bash
+git add labs/lab6/policies/my-custom-policy.yaml    # Bonus only
+git add submissions/lab6.md
+git commit -m "feat(lab6): Checkov + KICS scans + custom policy"
+git push -u origin feature/lab6
+```
 
-   ```bash
-   git switch -c feature/lab6
-   # create labs/submission6.md with your findings
-   git add labs/submission6.md labs/lab6/analysis/
-   git commit -m "docs: add lab6 submission - IaC security scanning and comparative analysis"
-   git push -u origin feature/lab6
-   ```
+> **Do NOT commit** `labs/lab6/results/` — scanner output is regeneratable. Submission paste-ins are the evidence.
 
-2. Open a PR from your fork's `feature/lab6` branch → **course repository's main branch**.
+PR checklist body:
 
-3. In the PR description, include:
-
-   ```text
-   - [x] Task 1 done — Terraform & Pulumi scanning with multiple tools
-   - [x] Task 2 done — Ansible security analysis
-   - [x] Task 3 done — Comparative tool analysis and security insights
-   ```
-
-4. **Copy the PR URL** and submit it via **Moodle before the deadline**.
+```text
+- [x] Task 1 — Checkov on Terraform + Pulumi with top-5 rules and module-leverage analysis
+- [ ] Task 2 — KICS on Ansible with Checkov-vs-KICS comparison
+- [ ] Bonus — Custom Checkov policy demonstrably firing on the vulnerable sample
+```
 
 ---
 
-## Rubric (10 pts)
+## Acceptance Criteria
 
-| Criterion                                                        | Points |
-| ---------------------------------------------------------------- | -----: |
-| Task 1 — Terraform & Pulumi scanning (multiple tools) + analysis |  **5** |
-| Task 2 — Ansible scanning (KICS) + remediation                  |  **2** |
-| Task 3 — Comparative analysis + security insights               |  **3** |
-| **Total**                                                        | **10** |
+### Task 1 (6 pts)
+- ✅ Checkov runs complete for both Terraform and Pulumi
+- ✅ Severity tables match actual JSON output (no placeholders)
+- ✅ Top-5 rules table populated with real CKV_AWS_*/CKV_GCP_* IDs + descriptions
+- ✅ Module-leverage analysis identifies ONE concrete fix with multi-finding impact
+
+### Task 2 (4 pts)
+- ✅ KICS scan completes on the Ansible sample
+- ✅ Severity + top-5 tables populated with real query names
+- ✅ Checkov-vs-KICS comparison has substantive 2-3-sentence answers per question
+
+### Bonus Task (2 pts)
+- ✅ Custom policy file exists at `labs/lab6/policies/my-custom-policy.yaml`
+- ✅ Policy has valid YAML schema (Checkov accepts it without parse errors)
+- ✅ Policy fires on ≥1 resource in the vulnerable Terraform sample (proof in submission)
+- ✅ "Why this rule matters" answer references a real incident or compliance control
 
 ---
 
-## Guidelines
+## Rubric
 
-- Use clear Markdown headers to organize sections in `submission6.md`.
-- Include evidence from tool outputs (JSON excerpts, command outputs) to support your analysis.
-- Focus on practical insights about tool selection for IaC security.
-- Provide actionable remediation steps for identified issues.
-- Document any challenges encountered with different tools.
+| Task | Points | Criteria |
+|------|-------:|----------|
+| **Task 1** — Checkov | **6** | Terraform + Pulumi scans + top-5 rules + module-leverage analysis |
+| **Task 2** — KICS | **4** | Ansible scan + Checkov-vs-KICS comparison with concrete examples |
+| **Bonus Task** — Custom policy | **2** | Valid YAML schema + actually firing on vulnerable resource + business justification |
+| **Total** | **12** | 10 main + 2 bonus |
+
+---
+
+## Resources
 
 <details>
-<summary>Directory Structure After Lab</summary>
+<summary>📚 Documentation</summary>
 
-```
-labs/lab6/
-├── vulnerable-iac/          # Vulnerable code to scan (DO NOT MODIFY)
-│   ├── terraform/           # 30 Terraform vulnerabilities
-│   ├── pulumi/              # 21 Pulumi vulnerabilities
-│   ├── ansible/             # 26 Ansible vulnerabilities
-│   └── README.md            # Vulnerability catalog
-├── analysis/                # All scan results and analysis
-│   ├── tfsec-results.json
-│   ├── tfsec-report.txt
-│   ├── checkov-terraform-results.json
-│   ├── checkov-terraform-report.txt
-│   ├── terrascan-results.json
-│   ├── terrascan-report.txt
-│   ├── kics-pulumi-results.json
-│   ├── kics-pulumi-report.html
-│   ├── kics-pulumi-report.txt
-│   ├── kics-ansible-results.json
-│   ├── kics-ansible-report.html
-│   ├── kics-ansible-report.txt
-│   ├── tool-comparison.txt
-│   ├── terraform-comparison.txt
-│   ├── pulumi-analysis.txt
-│   └── ansible-analysis.txt
-└── submission6.md            # Your submission document
-```
+- [Checkov rule catalog](https://www.checkov.io/5.Policy%20Index/terraform.html) — Every CKV_AWS_*/CKV_GCP_*/CKV_AZURE_* with description
+- [Checkov custom policies (YAML)](https://www.checkov.io/3.Custom%20Policies/YAML%20Custom%20Policies.html) — Schema for the bonus
+- [Checkov graph policies (CKV2_*)](https://www.checkov.io/3.Custom%20Policies/Graph%20YAML%20Custom%20Policies.html) — Cross-resource rules
+- [KICS queries catalog](https://docs.kics.io/latest/queries/all-queries/) — All 2,400+ Rego queries
+- [CIS Benchmarks](https://www.cisecurity.org/cis-benchmarks/) — Source of most rules (mentioned in Lecture 6)
 
 </details>
 
 <details>
-<summary>Common Issues & Troubleshooting</summary>
+<summary>⚠️ Common Pitfalls</summary>
 
-**Issue: Docker volume mount permission errors**
-```bash
-# Solution: Ensure you're running commands from the project root directory
-pwd  # Should show path ending in the course repo name
-```
-
-**Issue: jq command not found**
-```bash
-# Install jq for JSON parsing
-# macOS: brew install jq
-# Ubuntu: sudo apt-get install jq
-# Windows WSL: sudo apt-get install jq
-```
-
-**Issue: Checkov output format**
-```bash
-# Checkov uses -o flag for output format (json, cli, sarif, etc.)
-# Use shell redirection (>) to save output to a specific file
-# Example: -o json > output.json
-```
-
-**Issue: KICS exits with non-zero exit code**
-```bash
-# This is expected when vulnerabilities are found
-# We use "|| true" to continue execution and capture the output
-# Alternative: Use --ignore-on-exit results to suppress non-zero exit codes
-```
-
-**Issue: KICS not detecting Pulumi files**
-```bash
-# Ensure Pulumi-vulnerable.yaml is in the scan directory
-# KICS auto-detects Pulumi YAML files by extension and content
-# Verify KICS version supports Pulumi (v1.6.x+)
-# Use: docker run --rm checkmarx/kics:latest version
-```
-
-**Issue: KICS report directory not found**
-```bash
-# KICS creates the report directory automatically
-# Ensure you're using -o flag with proper path: -o /src/kics-report
-# The container path must match the mounted volume
-```
+- 🚨 **`pulumi preview --json` fails with "no Pulumi.yaml found"** — use the pre-rendered fallback `labs/lab6/vulnerable-iac/pulumi/pulumi-state-rendered.json` (shipped as plumbing).
+- 🚨 **Checkov scans 0 files** — `-d` expects a DIRECTORY; `-f` expects a single file. Pulumi's rendered state is `-f`; Terraform is `-d`.
+- 🚨 **KICS finds 0 issues on Ansible** — make sure the path includes the playbook YAML (`-p .../ansible/`). KICS sometimes silently skips files it doesn't recognize as Ansible. Check `kics list-platforms` to verify Ansible is in the supported list (it is).
+- 🚨 **Custom policy doesn't fire** — the most common cause is `attribute` path typos. Test on a known-failing resource first (e.g., your custom S3 rule on a bucket without your required block). Add `severity: HIGH` even if you don't need it; Checkov is picky about required fields.
+- 🚨 **`CKV_CUSTOM_*` ID conflicts with built-ins** — use `CKV2_CUSTOM_1+` (the `2` prefix marks graph rules and avoids collisions with the built-in numerical sequence).
+- 💡 **Read the plumbing README** — `labs/lab6/vulnerable-iac/README.md` lists which Checkov/KICS rules each vulnerable file is designed to trigger. Useful for sanity-checking your scans found what they should.
 
 </details>
 
 <details>
-<summary>Tool Comparison Reference</summary>
+<summary>🪜 Looking ahead</summary>
 
-**Terraform Scanning Tools:**
-- **tfsec**: Fast, Terraform-specific scanner with low false positives
-- **Checkov**: Policy-as-code approach with 1000+ built-in policies (supports Terraform, CloudFormation, K8s, Docker)
-- **Terrascan**: OPA-based scanner with compliance framework mapping
-
-**Pulumi Scanning:**
-- **KICS (Checkmarx)**: Open-source scanner with first-class Pulumi YAML support
-  - Dedicated Pulumi queries catalog for AWS, Azure, GCP, and Kubernetes
-  - Auto-detects Pulumi platform
-  - Announced Pulumi support in v1.6.x with continued expansion
-  - Provides JSON, HTML, SARIF, and console output formats
-
-**Ansible Scanning:**
-- **KICS (Checkmarx)**: Open-source scanner with comprehensive Ansible security queries
-  - Dedicated Ansible queries catalog
-  - Detects secrets management issues, command injection, insecure configurations
-  - Same tool across Terraform, Pulumi, and Ansible for consistency
-
-**Tool Selection Guidelines:
-- **tfsec**: Use for fast CI/CD scans, Terraform-specific checks
-- **Checkov**: Use for comprehensive Terraform and multi-framework coverage (CloudFormation, K8s, Docker)
-- **KICS**: Use for Pulumi and Ansible scanning with first-class support and extensive query catalog
-  - Provides unified scanning across Pulumi and Ansible
-  - Comprehensive security queries for AWS, Azure, GCP, Kubernetes resources
-  - Single tool for consistency across multiple IaC frameworks
-- **Terrascan**: Use for compliance-focused scanning (PCI-DSS, HIPAA, etc.)
-- **Conftest**: Use for custom organizational policy enforcement across all IaC types
-
-</details>
-
-<details>
-<summary>Common IaC Security Issues</summary>
-
-**Common Terraform & Pulumi Issues:**
-- Unencrypted S3 buckets and RDS instances
-- Security groups allowing 0.0.0.0/0 access
-- Hardcoded credentials and secrets
-- Missing resource tags for governance
-- Overly permissive IAM policies
-- Publicly accessible databases
-
-**Common Ansible Issues:**
-- Hardcoded passwords in playbooks
-- Missing `no_log` on sensitive tasks
-- Overly permissive file permissions (0777)
-- Using `shell` instead of proper modules
-- Missing `become` privilege escalation controls
-- Unencrypted Ansible Vault or missing vault usage
-
-**Security Requirements to Enforce:**
-- Encryption requirements (at-rest and in-transit)
-- Network segmentation and access controls
-- Tagging standards for governance and cost allocation
-- Region restrictions and compliance requirements
-- IAM least-privilege principles
-- Regular security assessments and audits
-
-</details>
-
-<details>
-<summary>Remediation Best Practices</summary>
-
-**Terraform & Pulumi Remediation:**
-- Enable S3 bucket encryption with `server_side_encryption_configuration`
-- Restrict security group ingress to specific CIDR blocks
-- Use AWS Secrets Manager or Parameter Store for credentials
-- Add required tags to all resources
-- Implement least-privilege IAM policies
-- Set RDS instances to `storage_encrypted = true`
-
-**Ansible Remediation:**
-- Use Ansible Vault for all secrets: `ansible-vault encrypt vars.yml`
-- Add `no_log: true` to tasks handling sensitive data
-- Set proper file permissions (0644 for configs, 0600 for keys)
-- Use Ansible modules instead of `shell`/`command` where possible
-- Implement proper `become` with specific users
-- Regular security updates in playbooks
-
-**Security Scanning Best Practices:**
-- Integrate security scanning into CI/CD pipelines
-- Use pre-commit hooks for early detection
-- Run multiple tools for comprehensive coverage
-- Regularly update scanning tools and their rule sets
-- Document and track remediation progress
-- Establish SLAs for fixing critical/high severity issues
+- **Lab 7** (Container Security) — uses Trivy `config` mode against Dockerfiles + K8s manifests; same SARIF pattern as Checkov here
+- **Lab 9** (Falco + Conftest) — Conftest uses **Rego** (same as KICS); your KICS reading today smooths Lab 9's Rego learning curve
+- **Lab 10** (DefectDojo) — imports Checkov and KICS JSON; you'll see how they dedupe at the program level
 
 </details>

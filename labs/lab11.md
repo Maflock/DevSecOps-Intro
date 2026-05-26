@@ -1,285 +1,397 @@
-# Lab 11 — Reverse Proxy Hardening: Nginx Security Headers, TLS, and Rate Limiting
+# Lab 11 — BONUS — Reverse Proxy Hardening: Nginx Security Headers, TLS, and Rate Limiting
 
-![difficulty](https://img.shields.io/badge/difficulty-intermediate-orange)
-![topic](https://img.shields.io/badge/topic-Application%20Hardening-blue)
+![difficulty](https://img.shields.io/badge/difficulty-advanced-red)
+![topic](https://img.shields.io/badge/topic-Reverse%20Proxy-blue)
 ![points](https://img.shields.io/badge/points-10-orange)
+![tech](https://img.shields.io/badge/tech-Nginx%20%2B%20OpenSSL-informational)
 
-> Goal: Place OWASP Juice Shop behind an Nginx reverse proxy and harden it with security headers, TLS, and request rate limiting — without changing app code.
-> Deliverable: A PR from `feature/lab11` with `labs/submission11.md` including command evidence, header/TLS scans, rate-limit test results, and a short analysis of trade-offs.
+> **Goal:** Put a hardened Nginx reverse proxy in front of Juice Shop — TLS 1.3, full security-header set, request rate limiting, fail-closed timeouts. Demonstrate each control with curl evidence.
+> **Deliverable:** A PR from `feature/lab11` with `submissions/lab11.md` + your hardened `nginx.conf`. Submit PR link via Moodle.
+
+> 🌟 **This is a BONUS lab** — 10 pts total (Task 1: 6 + Task 2: 4), no separate bonus row.
+> Bonus labs count toward a separate **30% weight** in your final grade (Lecture 1 README).
+> Difficulty is **advanced** — you're expected to operate more independently than in the main labs.
 
 ---
 
 ## Overview
 
-You will:
-- Deploy Juice Shop behind a reverse proxy using Docker Compose
-- Add and verify essential security headers (XFO, XCTO, HSTS, Referrer-Policy, Permissions-Policy, COOP/CORP)
-- Enable TLS with a local self-signed certificate and verify configuration
-- Implement request rate limiting and timeouts to reduce brute-force/DoS risk
+In this lab you will practice:
+- **Production-grade Nginx config** — listen, upstream, ssl_protocols, http/2
+- **TLS 1.3 + HSTS** — modern cert generation with `openssl`
+- **Security headers** — CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
+- **Rate limiting + connection limits** — `limit_req_zone` + `limit_conn_zone`
+- **Timeouts** — fail-closed behavior, not infinite hangs (Lecture 5/9 themes)
 
-This lab is designed to be practical and educational, focusing on changes operations teams can make without touching application code.
+> Why this lab matters: every public-facing service runs behind a proxy. The default Nginx config has none of the protections in this lab. Real production hardening starts here.
 
 ---
 
-## Prerequisites
+## Project State
 
-Before starting, ensure you have:
-- ✅ Docker installed and running (`docker --version`)
-- ✅ Docker Compose installed (`docker compose version`)
-- ✅ `curl` and `jq` for testing and JSON parsing
-- ✅ At least 2GB free disk space
-- ✅ ~45-60 minutes available
+**You should have from Labs 1+8:**
+- Juice Shop image (Lab 1) — it'll sit behind your proxy
+- Familiarity with security headers / TLS posture from Lecture 7
 
-**Quick Setup Check:**
+**This lab adds:**
+- A working `docker-compose` stack: nginx (in front) + juice-shop (behind)
+- A hardened `nginx.conf` with all controls demonstrated
+- Evidence (curl outputs + access logs) showing each control works
+
+---
+
+## Setup
+
+You need:
+- **Docker + docker-compose**
+- **`openssl`** — for self-signed cert generation
+- **`curl`** + **`jq`**
+
 ```bash
-# Pull images in advance (optional)
-docker pull bkimminich/juice-shop:v19.0.0
-docker pull nginx:stable-alpine
-docker pull alpine:latest
-docker pull drwetter/testssl.sh:latest
+git switch main && git pull
+git switch -c feature/lab11
 
-# Create working directories
-mkdir -p labs/lab11/{reverse-proxy/certs,logs,analysis}
+# Verify
+docker compose version && openssl version
 ```
 
-**Files provided in this repo:**
-- `labs/lab11/docker-compose.yml` - Stack configuration
-- `labs/lab11/reverse-proxy/nginx.conf` - Pre-configured with security headers, TLS, rate limiting
+> **Plumbing provided** (in `labs/lab11/`):
+> - [`labs/lab11/docker-compose.yml`](lab11/docker-compose.yml) — stack with nginx + juice-shop containers wired together
+> - [`labs/lab11/reverse-proxy/`](lab11/reverse-proxy/) — bare-bones starter Nginx config (NOT hardened — you'll harden it)
+
+```bash
+ls labs/lab11/docker-compose.yml labs/lab11/reverse-proxy/
+
+# Generate a self-signed cert (3650 days = ~10 years, fine for lab)
+mkdir -p labs/lab11/reverse-proxy/certs
+# File names MUST be `localhost.crt` / `localhost.key` — the shipped nginx.conf
+# expects those exact paths under /etc/nginx/certs/.
+openssl req -x509 -nodes -newkey rsa:4096 \
+  -keyout labs/lab11/reverse-proxy/certs/localhost.key \
+  -out labs/lab11/reverse-proxy/certs/localhost.crt \
+  -subj "/CN=juice.local" \
+  -days 3650
+```
 
 ---
 
-## Tasks
+## Task 1 — TLS + Security Headers + Rate Limiting (6 pts)
 
-### Task 1 — Reverse Proxy Compose Setup (2 pts)
-⏱️ **Estimated time:** 10 minutes
+**Objective:** Configure Nginx with TLS 1.3 only, the full security-header set, and a working rate limit.
 
-**Objective:** Run Juice Shop behind Nginx (no app port exposed directly).
+### 11.1: Harden the Nginx config
 
-#### 1.1: Prepare certs and start the stack
+Edit `labs/lab11/reverse-proxy/nginx.conf`:
+
+```nginx
+# YOUR TASK: Hardened Nginx reverse proxy
+# Requirements:
+#
+# 1. Listen on 443 only (HTTPS); redirect 80 → 443
+#    - `listen 443 ssl http2;`
+#    - `listen 80;` + `return 301 https://$host$request_uri;` in a separate server block
+#
+# 2. TLS 1.3 only (Lecture 7 misconfig list — old TLS = CKV_AWS_103 territory)
+#    - `ssl_protocols TLSv1.3;`
+#    - `ssl_prefer_server_ciphers off;` (TLS 1.3 ignores this)
+#
+# 3. HSTS (Strict-Transport-Security)
+#    - `add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;`
+#
+# 4. Other required security headers (Lecture 1/5):
+#    - X-Content-Type-Options: nosniff
+#    - X-Frame-Options: DENY
+#    - Referrer-Policy: strict-origin-when-cross-origin
+#    - Permissions-Policy: <something reasonable — e.g., disable camera/microphone>
+#    - Content-Security-Policy: default-src 'self' (start strict; relax only if needed)
+#
+# 5. Rate limit on /api/* paths (defaults to 10 req/s, burst 20)
+#    - `limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;` in http {} block
+#    - `limit_req zone=api burst=20 nodelay;` in the /api location block
+#
+# 6. Connection limit (max concurrent per IP)
+#    - `limit_conn_zone $binary_remote_addr zone=conn:10m;`
+#    - `limit_conn conn 50;`
+#
+# 7. Timeouts (fail-closed)
+#    - `client_body_timeout 10s;`
+#    - `client_header_timeout 10s;`
+#    - `proxy_read_timeout 30s;`
+#    - `proxy_connect_timeout 5s;`
+#
+# 8. Upstream Juice Shop
+#    - `upstream juice_shop { server juice-shop:3000; }`
+#    - All locations proxy_pass to it
+#
+# Hints:
+#   - Use the Mozilla SSL Configuration Generator (https://ssl-config.mozilla.org)
+#     "Modern" profile is TLS 1.3 only — that's what you want
+#   - Always add `always` keyword to add_header (otherwise it disappears on 5xx responses)
+```
+
+### 11.2: Bring up the stack
+
 ```bash
-# Navigate to lab11 directory
 cd labs/lab11
-
-# Generate a local self-signed cert with SAN for localhost so Nginx can start
-docker run --rm -v "$(pwd)/reverse-proxy/certs":/certs \
-  alpine:latest \
-  sh -c "apk add --no-cache openssl && cat > /tmp/san.cnf << 'EOF' && \
-cat /tmp/san.cnf && \
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /certs/localhost.key -out /certs/localhost.crt \
-  -config /tmp/san.cnf -extensions v3_req
-[ req ]
-default_bits = 2048
-distinguished_name = req_distinguished_name
-x509_extensions = v3_req
-prompt = no
-
-[ req_distinguished_name ]
-CN = localhost
-
-[ v3_req ]
-subjectAltName = @alt_names
-
-[ alt_names ]
-DNS.1 = localhost
-IP.1 = 127.0.0.1
-IP.2 = ::1
-EOF"
-
-# Start services
 docker compose up -d
-docker compose ps
+docker compose ps        # Both containers should be Healthy / Running
 
-# Verify HTTP (should redirect to HTTPS)
-curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8080/
+# Wait for Juice Shop to be ready (behind the proxy)
+until curl -sk https://localhost/rest/products > /dev/null; do sleep 2; done
+echo "✅ Juice Shop reachable via Nginx"
+
+cd -
 ```
 
-Expected: `HTTP 308` (redirect to HTTPS).
+### 11.3: Test each control
 
-#### 1.2: Confirm no direct app exposure
 ```bash
-# Only Nginx should have published host ports; Juice Shop should have none
-docker compose ps
+mkdir -p labs/lab11/results
+
+# A. HTTPS works, HTTP redirects
+curl -sI http://localhost | tee labs/lab11/results/http-redirect.txt
+# Should see: HTTP/1.1 301 Moved Permanently + Location: https://...
+
+# B. TLS 1.3
+echo | openssl s_client -connect localhost:443 -tls1_3 -brief 2>&1 | head -5 \
+  | tee labs/lab11/results/tls13.txt
+
+# C. Security headers
+curl -skI https://localhost | tee labs/lab11/results/headers.txt
+# Verify presence of: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, CSP
+
+# D. Rate limit kicks in (>10 req/s)
+seq 1 60 | xargs -n1 -P 60 -I{} curl -sk -o /dev/null -w "%{http_code}\n" \
+  https://localhost/api/ | sort | uniq -c | tee labs/lab11/results/ratelimit.txt
+# Should see a mix of 200 + 429 — at least some 429s
+
+# E. Timeout enforced (slowloris-style)
+# This sends bytes very slowly; nginx should kill after client_header_timeout
+echo "GET / HTTP/1.0" | timeout 15 nc localhost 443 2>&1 | head -5 \
+  | tee labs/lab11/results/timeout.txt
 ```
 
-In `labs/submission11.md`, document:
+### 11.4: Document in `submissions/lab11.md`
 
-**Task 1 Requirements:**
-  - Explain why reverse proxies are valuable for security (TLS termination, security headers injection, request filtering, single access point)
-  - Explain why hiding direct app ports reduces attack surface
-  - Include the `docker compose ps` output showing only Nginx has published host ports (Juice Shop shows none)
+```markdown
+# Lab 11 — BONUS — Submission
+
+## Task 1: TLS + Security Headers + Rate Limiting
+
+### nginx.conf (paste the SSL + HSTS + header + rate-limit + timeout sections)
+```nginx
+<paste relevant sections — not the whole file>
+```
+
+### A. HTTPS redirect proof
+```
+<paste labs/lab11/results/http-redirect.txt — must show 301 to https://>
+```
+
+### B. TLS 1.3 proof
+```
+<paste labs/lab11/results/tls13.txt — must show "Protocol  : TLSv1.3" line>
+```
+
+### C. Security headers proof
+```
+<paste labs/lab11/results/headers.txt — must show ALL 6 headers (HSTS, X-CTO, X-FO, Referrer-Policy, Permissions-Policy, CSP)>
+```
+
+### D. Rate limit proof
+| HTTP code | Count out of 60 |
+|-----------|----------------:|
+| 200 | <n> |
+| 429 | <n> |
+| 5xx | <n> |
+
+Excerpt of access log showing rate-limited requests:
+```
+<docker compose logs nginx | grep -E "limit|429" | head -5>
+```
+
+### E. Timeout enforced
+```
+<paste labs/lab11/results/timeout.txt — should show 408 Request Timeout or connection closed>
+```
+
+### What each header defends against (1 sentence each)
+- HSTS: ...
+- X-Content-Type-Options: nosniff: ...
+- X-Frame-Options: DENY: ...
+- Referrer-Policy: ...
+- Permissions-Policy: ...
+- Content-Security-Policy: ...
+```
 
 ---
 
-### Task 2 — Security Headers (3 pts)
-⏱️ **Estimated time:** 10 minutes
+## Task 2 — Production Posture: Cipher Hardening, OCSP, Cert Rotation (4 pts)
 
-**Objective:** Review the essential headers at the proxy and verify they’re present over HTTP/HTTPS.
+**Objective:** Move beyond the lab cert to production-relevant TLS posture — explicit cipher list, OCSP stapling enabled, document the cert rotation process.
 
-Headers configured in `nginx.conf`:
-  - `X-Frame-Options: DENY`
-  - `X-Content-Type-Options: nosniff`
-  - `Referrer-Policy: strict-origin-when-cross-origin`
-  - `Permissions-Policy: camera=(), geolocation=(), microphone=()`
-  - `Cross-Origin-Opener-Policy: same-origin`
-  - `Cross-Origin-Resource-Policy: same-origin`
-  - `Content-Security-Policy-Report-Only: default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'`
+### 11.5: Strengthen cipher list
 
-Note: CSP is set in Report-Only mode to avoid breaking Juice Shop functionality.
+Edit `nginx.conf` to add (TLS 1.3 cipher suites, Mozilla Modern):
 
-⏱️ ~10 minutes
+```nginx
+# These are the cipher suites in the TLS 1.3 RFC
+ssl_ciphers TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256;
 
-#### 2.1: Verify headers (HTTP)
-```bash
-curl -sI http://localhost:8080/ | tee analysis/headers-http.txt
+# Curves (modern + safe)
+ssl_ecdh_curve X25519:secp384r1;
+
+# Session resumption (avoid renegotiating TLS for every connection)
+ssl_session_cache shared:SSL:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;        # disable to avoid leaking previous-session key material
 ```
 
-#### 2.2: Verify headers (after TLS in Task 3)
-```bash
-curl -skI https://localhost:8443/ | tee analysis/headers-https.txt
+### 11.6: OCSP stapling (informational — self-signed cert doesn't actually staple)
+
+```nginx
+ssl_stapling on;
+ssl_stapling_verify on;
+resolver 8.8.8.8 1.1.1.1 valid=300s;
+resolver_timeout 5s;
 ```
 
-In `labs/submission11.md`, document:
+> Self-signed certs don't have a real CA to query OCSP from, so the directive is effectively documentation. In production with a real CA cert, this avoids cert-status round-trips on every TLS handshake.
 
-**Task 2 Requirements:**
-  - Paste relevant security headers from `headers-https.txt`
-  - For each header, explain what it protects against:
-    - **X-Frame-Options**: ---
-    - **X-Content-Type-Options**: ---
-    - **Strict-Transport-Security (HSTS)**: ---
-    - **Referrer-Policy**: ---
-    - **Permissions-Policy**: ---
-    - **COOP/CORP**: ---
-    - **CSP-Report-Only**: ---
----
+### 11.7: Test with `testssl.sh` or manually
 
-### Task 3 — TLS, HSTS, Rate Limiting & Timeouts (5 pts)
-⏱️ **Estimated time:** 20 minutes
-
-**Objective:** Confirm HTTPS and HSTS behavior, scan TLS, and validate rate limiting and timeouts to reduce brute-force and slowloris risks.
-
-#### 3.1: Scan TLS (testssl.sh)
-Use one of the following, depending on your OS:
 ```bash
-# Linux: use host networking to reach localhost:8443
-docker run --rm --network host drwetter/testssl.sh:latest https://localhost:8443 \
-  | tee analysis/testssl.txt
+# Reload nginx
+cd labs/lab11
+docker compose restart nginx
+cd -
 
-# Mac/Windows (Docker Desktop): target host.docker.internal
-docker run --rm drwetter/testssl.sh:latest https://host.docker.internal:8443 \
-  | tee analysis/testssl.txt
+# Test cipher list
+echo | openssl s_client -connect localhost:443 -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384 2>&1 \
+  | grep -E "Cipher|Server Temp Key" | tee labs/lab11/results/cipher.txt
 ```
 
----
+### 11.8: Document cert rotation process
 
-#### 3.2: Validate rate limiting on login
-Login rate limit is configured on `/rest/user/login` with Nginx `limit_req` and `limit_req_status 429`.
+```markdown
+## Task 2: Production Posture
 
-##### Trigger rate limiting
-```bash
-for i in $(seq 1 12); do \
-  curl -sk -o /dev/null -w "%{http_code}\n" \
-  -H 'Content-Type: application/json' \
-  -X POST https://localhost:8443/rest/user/login \
-  -d '{"email":"a@a","password":"a"}'; \
-done | tee analysis/rate-limit-test.txt
+### Cipher hardening (paste the ssl_ciphers + ssl_ecdh_curve + ssl_session_* lines)
+```nginx
+<paste>
 ```
-Expected: Some responses return `429` once the burst+rate thresholds are exceeded.
 
-In `labs/submission11.md`, document:
+### TLS handshake verification
+```
+<paste labs/lab11/results/cipher.txt>
+```
 
-**Task 3 Requirements:**
-- TLS/testssl summary:
-  - Summarize TLS protocol support from testssl scan (which versions are enabled)
-  - List cipher suites that are supported
-  - Explain why TLSv1.2+ is required (prefer TLSv1.3)
-  - Note any warnings or vulnerabilities from testssl output
-  - Confirm HSTS header appears only on HTTPS responses (not HTTP)
+### Cert rotation process (write the runbook — 5-7 steps)
+1. **Detect expiry** — <e.g., "monitoring alert on cert expiry < 30 days">
+2. **Order new cert** — <e.g., "Let's Encrypt via certbot, or vendor CA">
+3. **Validate** — <how to verify the new cert is good BEFORE deploying>
+4. **Deploy** — <atomic swap — rename old + new + reload nginx; or use a separate path>
+5. **Verify** — <`curl -vk` to confirm new cert serves; `openssl s_client` to check chain>
+6. **Rollback plan** — <what if the new cert breaks? Keep the old key/cert; one-line revert>
+7. **Audit** — <log to your SIEM / DefectDojo / ticket system>
 
-Note on dev certificates: On localhost you should still expect these “NOT ok” items with a self‑signed cert: chain of trust (self‑signed), OCSP/CRL/CT/CAA, and OCSP stapling not offered. To eliminate them, either trust a local CA (e.g., mkcert) or use a real domain and a public CA (e.g., Let’s Encrypt) and then enable OCSP stapling (comments in nginx.conf).
-
-- Rate limiting & timeouts:
-  - Show rate-limit test output (how many 200s vs 429s)
-  - Explain the rate limit configuration: `rate=10r/m`, `burst=5`, and why these values balance security vs usability
-  - Explain timeout settings in nginx.conf: `client_body_timeout`, `client_header_timeout`, `proxy_read_timeout`, `proxy_send_timeout`, with trade-offs
-  - Paste relevant lines from access.log showing 429 responses
-
----
-
-## Acceptance Criteria
-
-- ✅ Nginx reverse proxy running; Juice Shop not directly exposed
-- ✅ Security headers present over HTTP/HTTPS; HSTS only on HTTPS
-- ✅ TLS enabled and scanned; HSTS verified; outputs captured
-- ✅ Rate limiting returns 429 on excessive login attempts; logs captured; timeouts discussed
-- ✅ All outputs committed under `labs/lab11/`
-
----
-
-## Cleanup
-
-After completing the lab:
-
-```bash
-# Stop and remove containers
-cd labs/lab11  # if not already there
-docker compose down
-
-# Optional: Remove generated certificates
-# rm -rf labs/lab11/reverse-proxy/certs/*
-
-# Check disk space
-docker system df
+### What OCSP stapling buys you (2-3 sentences)
+Why is OCSP stapling useful for production but not for a self-signed lab cert?
+Reference Lecture 8 (signing/verification chain) — OCSP is the "fast revocation check"
+piece of the chain.
 ```
 
 ---
 
 ## How to Submit
 
-1. Create a branch and push it to your fork:
 ```bash
-git switch -c feature/lab11
-# create labs/submission11.md with your findings
-git add labs/lab11/ labs/submission11.md
-git commit -m "docs: add lab11 — nginx reverse proxy hardening"
+git add labs/lab11/reverse-proxy/nginx.conf
+git add submissions/lab11.md
+git commit -m "feat(lab11): hardened nginx reverse proxy in front of juice shop"
 git push -u origin feature/lab11
+
+# Cleanup
+cd labs/lab11
+docker compose down
+cd -
 ```
-2. Open a PR from your fork’s `feature/lab11` → course repo’s `main`.
-3. In the PR description include:
+
+> **Do NOT commit** `labs/lab11/reverse-proxy/certs/` — keys + certs should be gitignored. Submission paste-ins are the evidence.
+
+PR checklist body:
+
 ```text
-- [x] Task 1 — Reverse proxy compose setup
-- [x] Task 2 — Security headers verification
-- [x] Task 3 — TLS + HSTS + rate limiting + timeouts (+ testssl)
+- [x] Task 1 — TLS 1.3 + 6 security headers + rate limit + timeouts (all with proof)
+- [ ] Task 2 — Cipher list + session config + cert-rotation runbook
 ```
-4. Submit the PR URL via Moodle before the deadline.
 
 ---
 
-## Rubric (10 pts)
+## Acceptance Criteria
 
-| Criterion                                             | Points |
-| ----------------------------------------------------- | -----: |
-| Task 1 — Reverse proxy compose setup                  |    2.0 |
-| Task 2 — Security headers (HTTP/HTTPS)                |    3.0 |
-| Task 3 — TLS, HSTS, rate limiting & timeouts          |    5.0 |
-| Total                                                 |   10.0 |
+### Task 1 (6 pts)
+- ✅ HTTPS serves; HTTP → HTTPS 301 redirect works
+- ✅ TLS 1.3 negotiated (`openssl s_client -tls1_3` succeeds)
+- ✅ All 6 security headers present (HSTS, X-CTO, X-FO, Referrer-Policy, Permissions-Policy, CSP)
+- ✅ Rate limit demonstrably returns 429 on >10 req/s sustained load
+- ✅ Slowloris-style request triggers timeout (408 or connection close)
+- ✅ Each header's purpose explained in 1 sentence (no copy-paste from Mozilla docs)
+
+### Task 2 (4 pts)
+- ✅ `ssl_ciphers` configured to TLS 1.3 suite (no fallback to TLS 1.2 ciphers)
+- ✅ `ssl_ecdh_curve` includes X25519
+- ✅ Session resumption configured (`ssl_session_cache shared`)
+- ✅ Cert rotation runbook has all 7 steps (detect → order → validate → deploy → verify → rollback → audit)
+- ✅ OCSP-stapling explanation references the production-vs-lab gap honestly
 
 ---
 
-## Guidelines
+## Rubric
 
-- Keep app container internal; only expose Nginx ports to host
-- Use `add_header ... always;` so headers appear even on errors/redirects
-- Place HSTS only on HTTPS server blocks
-- Start CSP in Report-Only and iterate; Juice Shop is JS-heavy and can break under strict CSP
-- Choose rate limits that balance security and usability; document your rationale
+| Task | Points | Criteria |
+|------|-------:|----------|
+| **Task 1** — TLS + headers + rate limit | **6** | All 5 controls with proof + per-header explanation |
+| **Task 2** — Production posture | **4** | Cipher hardening + 7-step rotation runbook + OCSP explanation |
+| **Total** | **10** | (No bonus row — this IS the bonus lab) |
+
+---
+
+## Resources
 
 <details>
-<summary>Resources</summary>
+<summary>📚 Documentation</summary>
 
-- Nginx security headers: https://nginx.org/en/docs/http/ngx_http_headers_module.html
-- TLS config guidelines: https://ssl-config.mozilla.org/
-- testssl.sh: https://github.com/drwetter/testssl.sh
-- Permissions Policy: https://www.w3.org/TR/permissions-policy-1/
+- [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/) — Pick "Modern", paste output, adjust
+- [Nginx official `ssl_*` directives](https://nginx.org/en/docs/http/ngx_http_ssl_module.html) — Authoritative reference
+- [OWASP Secure Headers Project](https://owasp.org/www-project-secure-headers/) — Defends-against descriptions
+- [Mozilla Web Security Cheatsheet](https://infosec.mozilla.org/guidelines/web_security) — Per-header reasoning
+- [Let's Encrypt + certbot](https://certbot.eff.org/) — For real cert rotation
+
+</details>
+
+<details>
+<summary>⚠️ Common Pitfalls</summary>
+
+- 🚨 **`curl: (60) SSL certificate problem`** — your cert is self-signed. Use `-k` (insecure) flag for testing. In real production, the cert chain to a public CA root is what makes `curl` happy without `-k`.
+- 🚨 **`add_header` directives disappear on 5xx responses** — always use the `always` keyword: `add_header Strict-Transport-Security "..." always;`.
+- 🚨 **TLS 1.3 negotiation falls back to TLS 1.2** — you forgot `ssl_protocols TLSv1.3;` (without the `TLSv1.2` fallback). Some testing tools auto-fall-back; check `openssl s_client -tls1_3` explicitly.
+- 🚨 **Rate limit always returns 503 instead of 429** — Nginx returns 503 by default. Set `limit_req_status 429;` in the http{} block.
+- 🚨 **`docker compose up` fails with "host port already in use" on 80 or 443** — kill local Apache/nginx/other-proxy first: `sudo systemctl stop apache2 nginx`. Or remap to 8080/8443 in compose.
+- 🚨 **CSP `default-src 'self'` breaks Juice Shop frontend** — Juice Shop loads inline scripts + remote fonts; full CSP requires extensive testing. For the lab, demonstrate it WORKS at strict; document the relax-as-needed approach for real deployments.
+- 💡 **`testssl.sh`** is the industry-standard TLS posture tool. Install it (`brew install testssl`) and run `testssl.sh localhost:443` for a free A+ assessment.
+
+</details>
+
+<details>
+<summary>🪜 Looking outside this course</summary>
+
+The hardened proxy you built here is **production-grade** for a single-domain deployment:
+- Add Let's Encrypt + certbot for real cert automation
+- Add `fail2ban` + Nginx access log scraping for IP-based abuse blocking
+- Add ModSecurity + OWASP Core Rule Set for a real WAF layer
+- For multi-domain / cluster deployments: Envoy or Traefik often replace Nginx
+
+Add this to your portfolio walkthrough (Lab 10 bonus) — "I built a hardened reverse proxy with the full security-header set, rate limiting, and TLS 1.3" is a strong interview line.
 
 </details>

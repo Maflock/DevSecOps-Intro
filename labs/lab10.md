@@ -1,209 +1,451 @@
-# Lab 10 — Vulnerability Management & Response with DefectDojo
+# Lab 10 — Vulnerability Management with DefectDojo: The Capstone
 
-![difficulty](https://img.shields.io/badge/difficulty-intermediate-orange)
-![topic](https://img.shields.io/badge/topic-Vulnerability%20Management-blue)
-![points](https://img.shields.io/badge/points-10-orange)
+![difficulty](https://img.shields.io/badge/difficulty-intermediate-yellow)
+![topic](https://img.shields.io/badge/topic-Vuln%20Management-blue)
+![points](https://img.shields.io/badge/points-10%2B2-orange)
+![tech](https://img.shields.io/badge/tech-DefectDojo-informational)
 
-> Goal: Stand up DefectDojo locally, import prior lab findings (ZAP, Semgrep, Trivy/Grype, Nuclei), and produce a stakeholder-ready reporting & metrics package.
-> Deliverable: A PR from `feature/lab10` with `labs/submission10.md` summarizing setup evidence, import results, metrics snapshot highlights, and links to exported artifacts. Submit the PR link via Moodle.
+> **Goal:** Spin up DefectDojo locally, import every scan report from Labs 4–9, apply the SLA matrix from Lecture 9, compute program metrics, and (bonus) produce a 5-minute interview-walkthrough script.
+> **Deliverable:** A PR from `feature/lab10` with `submissions/lab10.md` (governance report) and (bonus) `submissions/lab10-walkthrough.md` (interview script). Submit PR link via Moodle.
 
 ---
 
 ## Overview
 
-In this lab you will practice:
-- Standing up OWASP DefectDojo locally via Docker Compose
-- Organizing findings across products/engagements/tests
-- Importing findings from multiple tools (ZAP, Semgrep, Trivy, Nuclei)
-- Generating reports that non-technical stakeholders can consume
-- Deriving basic program metrics (open/closed status, severity mix, SLA outlook)
+This is the **capstone**. You have 9 labs of scan output. Lab 10 turns them into a **program**.
 
-> Primary platform: OWASP DefectDojo (open source, 2025)
+In this lab you will practice:
+- **DefectDojo v2.58.x** (Lecture 10 slide 9) — setup, importers, dedup, SLA matrix
+- **Cross-tool dedup** — same CVE found by Trivy + Grype + Trivy-K8s collapsing into one finding
+- **CVSS + EPSS triage** (Lecture 10 slides 5-7) — the 2×2 prioritization matrix
+- **Program metrics** (Lecture 10 slide 13) — MTTD/MTTR/vuln-age/backlog/SLA-compliance
+- (Bonus) **5-minute interview walkthrough** — the deliverable that gets you hired
+
+> If you've kept your Lab 4–9 outputs, this lab is doable in one sitting. If not, regenerate them before starting.
 
 ---
 
-## Prerequisites
+## Project State
 
-- Docker with Compose V2 (`docker compose` available)
-- `git`, `curl`, `jq`
-- Prior lab outputs available locally (paths below)
+**You should have from Labs 4-9** (regenerate if missing):
+- Lab 4: `juice-shop.cdx.json`, `grype-from-sbom.json`, `trivy.json`
+- Lab 5: `auth-report.json` (ZAP), `semgrep.json`
+- Lab 6: `checkov-terraform/results_json.json`, `kics/results.json`
+- Lab 7: `trivy-image.json`, `trivy-k8s.json`
+- Lab 8: `verify-original.json` (Cosign verify output)
+- Lab 9: `falco/logs/falco.log` (custom alerts)
 
-Create working directories:
+**This lab adds:**
+- A working DefectDojo instance
+- A unified product/engagement with all imports + dedup applied
+- A governance report with real metrics
+- (Bonus) An interview-ready walkthrough script
+
+---
+
+## Setup
+
+You need:
+- **Docker + docker-compose** (DefectDojo runs as 7+ containers)
+- **`jq`** + **`curl`**
+- ~4 GB free memory (DefectDojo is heavyweight)
+
 ```bash
-mkdir -p labs/lab10/{setup,imports,report}
+git switch main && git pull
+git switch -c feature/lab10
+
+mkdir -p labs/lab10/work
 ```
 
+> **Plumbing provided** (in `labs/lab10/imports/`):
+> - Import script that maps the Lab 4-9 file paths to DefectDojo scan-type names
+> - Sample environment variables file
+
 ---
 
-## Tasks
+## Task 1 — DefectDojo Setup + Import All Prior Findings (6 pts)
 
-### Task 1 — DefectDojo Local Setup (2 pts)
-Objective: Run DefectDojo locally and prepare the structure for managing findings.
+**Objective:** Run DefectDojo locally, get the admin credentials, create a Product + Engagement for "Juice Shop", import every Lab 4-9 report.
 
-#### 1.1: Clone and start DefectDojo
+### 10.1: Clone + start DefectDojo
+
 ```bash
-# Clone upstream
-git clone https://github.com/DefectDojo/django-DefectDojo.git labs/lab10/setup/django-DefectDojo
-cd labs/lab10/setup/django-DefectDojo
+# DefectDojo's official compose deployment
+cd labs/lab10/work
+git clone https://github.com/DefectDojo/django-DefectDojo dd
+cd dd
 
-# Optional: check compose compatibility
-./docker/docker-compose-check.sh || true
+# Check compose version compatibility
+./docker/setEnv.sh dev    # writes the .env file
 
-# Build and start (first run can take a bit)
-docker compose build
+# Pull + start (first run takes 5-10 minutes)
 docker compose up -d
+# Watch initializer logs until you see "Admin password: ..."
+docker compose logs initializer | grep -i password
 
-# Verify containers are healthy
-docker compose ps
 # UI: http://localhost:8080
 ```
 
-#### 1.2: Get admin credentials (no manual superuser needed)
+### 10.2: Extract admin token
+
 ```bash
-# Watch initializer logs until the admin password is printed
-docker compose logs -f initializer
-# In a second terminal, extract the password once available:
-docker compose logs initializer | grep "Admin password:"
+# Login UI at http://localhost:8080 — admin / <password from initializer logs>
+# Go to: Profile → API v2 Key → copy your token
 
-# Login to the UI at http://localhost:8080 with:
-#   Username: admin
-#   Password: <the value printed above>
-```
----
+# Export for the importer
+export DD_URL="http://localhost:8080"
+export DD_TOKEN="<your-api-token>"
 
-### Task 2 — Import Prior Findings (4 pts)
-Objective: Import findings from your previous labs into the engagement.
-
-Use the importer script below; no manual API calls are required. The script will auto‑create the product type/product/engagement if missing.
-
-#### 2.1: Get API token and set variables
-```bash
-# In the UI: Profile → API v2 Key → copy your token
-export DD_API="http://localhost:8080/api/v2"
-export DD_TOKEN="REPLACE_WITH_YOUR_API_TOKEN"
-
-# Target context (adjust names if you prefer)
-export DD_PRODUCT_TYPE="Engineering"
-export DD_PRODUCT="Juice Shop"
-export DD_ENGAGEMENT="Labs Security Testing"
-# The import script will auto-detect importer names from your instance.
+# Verify
+curl -s -H "Authorization: Token $DD_TOKEN" \
+  "$DD_URL/api/v2/products/" | jq .count
+# Should print 0 (no products yet)
 ```
 
-#### 2.2: Required reports (expected paths)
-- ZAP: `labs/lab5/zap/zap-report-noauth.json`
-- Semgrep: `labs/lab5/semgrep/semgrep-results.json`
-- Trivy: `labs/lab4/trivy/trivy-vuln-detailed.json`
-- Nuclei: `labs/lab5/nuclei/nuclei-results.json`
-- Grype (optional): `labs/lab4/syft/grype-vuln-results.json`
+### 10.3: Create Product + Engagement
 
-#### 2.3: Run the importer script
 ```bash
-bash labs/lab10/imports/run-imports.sh
+# Via API (also doable in UI)
+PRODUCT_ID=$(curl -s -X POST "$DD_URL/api/v2/products/" \
+  -H "Authorization: Token $DD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "OWASP Juice Shop",
+    "description": "DevSecOps-Intro capstone product",
+    "prod_type": 1
+  }' | jq -r .id)
+echo "Product: $PRODUCT_ID"
+
+ENGAGEMENT_ID=$(curl -s -X POST "$DD_URL/api/v2/engagements/" \
+  -H "Authorization: Token $DD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"name\": \"Course Semester Run\",
+    \"product\": $PRODUCT_ID,
+    \"target_start\": \"2026-09-01\",
+    \"target_end\": \"2026-12-15\",
+    \"engagement_type\": \"CI/CD\",
+    \"status\": \"In Progress\"
+  }" | jq -r .id)
+echo "Engagement: $ENGAGEMENT_ID"
 ```
-The script auto-detects importer names, auto-creates context if missing, imports any reports found at the paths above, and saves responses under `labs/lab10/imports/`.
+
+### 10.4: Import scan files
+
+For each prior lab, run:
+
+```bash
+# Template — repeat for each scan type
+curl -X POST "$DD_URL/api/v2/import-scan/" \
+  -H "Authorization: Token $DD_TOKEN" \
+  -F "scan_type=Trivy Scan" \
+  -F "engagement=$ENGAGEMENT_ID" \
+  -F "file=@../../lab7/results/trivy-image.json"
+```
+
+Scan-type names to use:
+
+| Lab | File | DefectDojo scan_type |
+|-----|------|----------------------|
+| 4 | `grype-from-sbom.json` | `Anchore Grype` |
+| 4 | `trivy.json` | `Trivy Scan` |
+| 5 | `semgrep.json` | `Semgrep JSON Report` |
+| 5 | `auth-report.json` | `ZAP Scan` |
+| 6 | `checkov-terraform/results_json.json` | `Checkov Scan` |
+| 6 | `kics/results.json` | `KICS Scan` |
+| 7 | `trivy-image.json` | `Trivy Scan` |
+| 7 | `trivy-k8s.json` | `Trivy Operator Scan` |
+| 9 | `falco/logs/falco.log` | (custom-format — skip if not supported, document instead) |
+
+Use the importer script in `labs/lab10/imports/import-all.sh` to automate.
+
+### 10.5: Verify import + dedup
+
+```bash
+# Count findings per scan source
+curl -s -H "Authorization: Token $DD_TOKEN" \
+  "$DD_URL/api/v2/findings/?engagement=$ENGAGEMENT_ID&limit=1" | jq .count
+# Should be 100s
+
+# Dedup is automatic — verify with: same CVE appearing once
+curl -s -H "Authorization: Token $DD_TOKEN" \
+  "$DD_URL/api/v2/findings/?engagement=$ENGAGEMENT_ID&cve=CVE-2024-21626" | jq '.results | length'
+# Should be 1 if your image had this CVE (it's the runc Leaky Vessels CVE)
+```
+
+### 10.6: Document in `submissions/lab10.md`
+
+```markdown
+# Lab 10 — Submission
+
+## Task 1: DefectDojo Setup + Import
+
+### DefectDojo version
+- Version installed: <output of `docker compose images defectdojo-uwsgi | grep IMAGE`>
+
+### Product + Engagement
+- Product ID: <n>
+- Product name: OWASP Juice Shop
+- Engagement ID: <n>
+- Engagement status: In Progress
+
+### Imports completed
+| Lab | Scan type | File | Findings imported |
+|-----|-----------|------|------------------:|
+| 4 | Anchore Grype | grype-from-sbom.json | <n> |
+| 4 | Trivy Scan | trivy.json | <n> |
+| 5 | Semgrep JSON Report | semgrep.json | <n> |
+| 5 | ZAP Scan | auth-report.json | <n> |
+| 6 | Checkov Scan | results_json.json | <n> |
+| 6 | KICS Scan | results.json | <n> |
+| 7 | Trivy Scan (image) | trivy-image.json | <n> |
+| 7 | Trivy Operator Scan | trivy-k8s.json | <n> |
+| **Total raw imports** | | | <SUM> |
+| **After dedup** | | | <n unique findings> |
+
+### Dedup example (Lecture 10 slide 11)
+Find ONE finding that DefectDojo dedupped across tools (same CVE/issue from ≥2 scanners). Quote:
+- CVE/ID: <e.g. CVE-2024-21626>
+- Number of source tools: <e.g. 3 — Trivy image, Trivy k8s, Grype>
+- DefectDojo's single finding ID: <n>
+```
+
 ---
 
-### Task 3 — Reporting & Program Metrics (4 pts)
-Objective: Turn raw imports into an easy-to-understand report and metrics package that a stakeholder can consume without prior Dojo experience.
+## Task 2 — Governance Report with Program Metrics (4 pts)
 
-#### 3.1: Create a baseline progress snapshot
-- From the engagement dashboard, note the counts for Active, Verified, and Mitigated findings.
-- Use the “Filters” sidebar to group by severity; grab a screenshot or jot the numbers.
-- Record the snapshot using the template below:
-  ```bash
-  mkdir -p labs/lab10/report
-  cat > labs/lab10/report/metrics-snapshot.md <<'EOF'
-  # Metrics Snapshot — Lab 10
+> ⏭️ Optional. Skipping won't affect future labs (there are none!), but the metrics work is what makes this Lab 10 different from "ran a tool."
 
-  - Date captured: <enter date>
-  - Active findings:
-    - Critical: <enter number>
-    - High: <enter number>
-    - Medium: <enter number>
-    - Low: <enter number>
-    - Informational: <enter number>
-  - Verified vs. Mitigated notes: <short summary>
-  EOF
-  ```
+**Objective:** Apply the SLA matrix from Lecture 9 / 10 slide 8, compute MTTD/MTTR/vuln-age/backlog, write a 1-page governance report.
 
-#### 3.2: Generate governance-ready artifacts
-- In the Engagement → Reports page, choose a human-readable template (Executive, Detailed, or similar) and generate a PDF or HTML report.
-  - Save it to `labs/lab10/report/dojo-report.pdf` or `.html`.
-- Download the “Findings list (CSV)” from the same page and store it as `labs/lab10/report/findings.csv` for spreadsheet analysis.
+### 10.7: Apply the SLA matrix
 
-#### 3.3: Extract key metrics for `labs/submission10.md`
-- From the report or dashboard, capture:
-  - Open vs. Closed counts by severity.
-  - Findings per tool (ZAP, Semgrep, Trivy, Nuclei, and Grype).
-  - Any SLA breaches or items due within the next 14 days.
-  - Top recurring CWE/OWASP categories.
-- Summarize these in prose (3–5 bullet points) inside `labs/submission10.md`.
+In DefectDojo UI:
+- **Configuration → SLA Configuration**:
+  - Critical: 24 hours
+  - High: 7 days
+  - Medium: 30 days
+  - Low: 90 days
+- Apply to your Engagement
 
-Deliverables for this task:
-- `labs/lab10/report/metrics-snapshot.md`
-- `labs/lab10/report/dojo-report.(pdf|html)`
-- `labs/lab10/report/findings.csv`
-- Metric summary bullets in `labs/submission10.md`
+OR via API. Document either way.
+
+### 10.8: Compute metrics
+
+```bash
+# MTTR — for closed findings only
+curl -s -H "Authorization: Token $DD_TOKEN" \
+  "$DD_URL/api/v2/findings/?engagement=$ENGAGEMENT_ID&is_mitigated=true" | \
+  jq '[.results[] | {detected: .date, closed: .mitigated, severity}]' \
+  > labs/lab10/work/mttr-source.json
+
+# Severity distribution
+curl -s -H "Authorization: Token $DD_TOKEN" \
+  "$DD_URL/api/v2/findings/?engagement=$ENGAGEMENT_ID&active=true" | \
+  jq '[.results[] | .severity] | group_by(.) | map({severity: .[0], count: length})'
+
+# SLA compliance — count findings per (active/mitigated, within/over SLA)
+# Use the UI dashboards for the visual; API for the numbers
+```
+
+### 10.9: Write the governance report
+
+```markdown
+## Task 2: Governance Report
+
+### Executive Summary (3 sentences)
+Juice Shop, scanned across <n> tools, currently has <n> open findings (<n> Critical + <n> High).
+Mean Time to Remediate (MTTR) on closed-this-period findings is <n> days. <n>% of findings closed
+within their SLA.
+
+### Findings by severity (active only)
+| Severity | Count |
+|----------|------:|
+| Critical | <n> |
+| High | <n> |
+| Medium | <n> |
+| Low | <n> |
+
+### Findings by source tool
+| Tool | Active | Mitigated | False Positive | Risk Accepted |
+|------|-------:|----------:|---------------:|--------------:|
+| ... |
+
+### Program metrics
+- **MTTD** (Mean Time to Detect): <n> days
+- **MTTR** (Mean Time to Remediate): <n> days
+- **Vuln-age median** (open findings): <n> days
+- **Backlog trend**: <+/- n> findings vs. <baseline>
+- **SLA compliance**: <n>%
+
+### Risk-accepted items (must have expiry)
+| Finding | Severity | Reason | Expiry date |
+|---------|----------|--------|-------------|
+| ... (list all your "Risk Accepted" findings — they all must have expiry per Lecture 10 slide 12) |
+
+### Next-quarter goal (OWASP SAMM ladder step — Lecture 9 slide 15)
+What ONE concrete SAMM practice would you mature next quarter, and why?
+(2-3 sentences with specific data — e.g., "Defect Management — current MTTR for High
+is X days, target Y; add Falco-runtime ingestion via custom parser.")
+```
 
 ---
 
-## Acceptance Criteria
+## Bonus Task — 5-Minute Interview Walkthrough Script (2 pts)
 
-- ✅ DefectDojo runs locally and an admin user can log in
-- ✅ Product Type, Product, and Engagement are configured
-- ✅ Imports completed for ZAP, Semgrep, Trivy (plus Nuclei/Grype if available)
-- ✅ Reporting artifacts generated: metrics snapshot, Dojo report, findings CSV, and summary bullets in `labs/submission10.md`
-- ✅ All artifacts saved under `labs/lab10/`
+> 🌟 **The deliverable that gets you hired.** Many DevSecOps interviews are "talk me through your last program" for 5 minutes. This bonus produces exactly that script.
+
+**Objective:** Write a 5-minute walkthrough following Lecture 10 slide 15 structure.
+
+### B.1: Write the script
+
+Create `submissions/lab10-walkthrough.md`:
+
+```markdown
+# 5-Minute DevSecOps Program Walkthrough — Juice Shop
+
+## (0:00–0:30) Context
+[1 sentence: I built a DevSecOps program around OWASP Juice Shop as the target...
+1 sentence: Tools used, scope, what's signed/scanned/verified.]
+
+## (0:30–2:00) Layers
+[Draw the diagram from Lecture 9 slide 18 in your words. Talk through:
+- Pre-commit: gitleaks for secrets + SSH-signed commits
+- Build: SBOM (Syft), SCA (Grype), SAST (Semgrep)
+- Pre-deploy: Checkov on IaC, Cosign sign + Conftest gate
+- Runtime: Falco eBPF detection
+- Program: DefectDojo aggregation + SLA matrix + MTTR/age]
+
+## (2:00–3:00) Findings + Closures
+[Talk through:
+- "We closed <n> Critical findings this term."
+- "Here's one I risk-accepted — <name> — expiring <date>, why: <reason>."
+- "Strongest correlated finding: <name> — caught by both Semgrep and ZAP, fix was <X>."]
+
+## (3:00–4:00) Metrics
+[Talk through:
+- MTTR: <n> days (compare to DORA Elite which is <1 day, Lecture 9 slide 13)
+- Vuln-age median: <n> days
+- SLA compliance: <n>%
+- Backlog trend: <stable/falling/rising>]
+
+## (4:00–4:30) Next Steps
+[1 sentence: "If I had another quarter, I'd ship..."
+1 sentence: tied to OWASP SAMM ladder progression.]
+
+## (4:30–5:00) Q&A Anticipation
+Anticipate 2 likely questions and answer them in your script:
+1. "How would you handle a Log4Shell scenario?" → 1-paragraph answer referencing the SBOM
+2. "Why didn't you use IAST/paid tools?" → honest tradeoff
+```
+
+### B.2: Practice it
+
+Read it out loud. Time yourself. If you're over 5 minutes, **cut something** — interviews don't pause.
+
+### B.3: Document in `submissions/lab10.md`
+
+```markdown
+## Bonus: Interview Walkthrough
+
+- Walkthrough script: see `submissions/lab10-walkthrough.md`
+- Practiced runtime: <n minutes:seconds>
+- Two anticipated Q&A questions covered: yes / no
+- Strongest claim in the script (most-quoted-by-interviewer line, in your view): <quote>
+```
 
 ---
 
 ## How to Submit
 
-1. Create a branch for this lab and push it to your fork:
 ```bash
-git switch -c feature/lab10
-# create labs/submission10.md with your findings
-git add labs/lab10/ labs/submission10.md
-git commit -m "docs: lab10 — DefectDojo vuln management"
+git add submissions/lab10.md
+git add submissions/lab10-walkthrough.md     # Bonus only
+git commit -m "feat(lab10): defectdojo governance report + capstone walkthrough"
 git push -u origin feature/lab10
+
+# Cleanup
+cd labs/lab10/work/dd && docker compose down -v
 ```
-2. Open a PR from your fork’s `feature/lab10` → course repo’s `main`.
-3. Include this checklist in the PR description:
+
+> **Do NOT commit** `labs/lab10/work/dd/` — it's the upstream DefectDojo source clone. Add to `.gitignore`.
+
+PR checklist body:
+
 ```text
-- [x] Task 1 — Dojo setup and structure
-- [x] Task 2 — Imports completed (multi-tool)
-- [x] Task 3 — Report + metrics package
+- [x] Task 1 — DefectDojo setup + imports + dedup proof
+- [ ] Task 2 — Governance report with MTTD/MTTR/SLA/backlog
+- [ ] Bonus — 5-minute walkthrough script with timed practice
 ```
-4. Submit the PR URL via Moodle before the deadline.
 
 ---
 
-## Rubric (10 pts)
+## Acceptance Criteria
 
-| Criterion                                                    | Points |
-| ------------------------------------------------------------ | -----: |
-| Task 1 — DefectDojo local setup                              |    2.0 |
-| Task 2 — Import prior findings (multi-tool)                  |    4.0 |
-| Task 3 — Reporting & metrics package                         |    4.0 |
-| Total                                                        |   10.0 |
+### Task 1 (6 pts)
+- ✅ DefectDojo running locally; admin password documented
+- ✅ Product + Engagement created (IDs in submission)
+- ✅ ≥6 scan types imported from Labs 4-9
+- ✅ Imports-table populated with real counts
+- ✅ ONE cross-tool dedup example documented (specific CVE + N source tools)
+
+### Task 2 (4 pts)
+- ✅ SLA matrix applied (24h / 7d / 30d / 90d for Critical / High / Medium / Low)
+- ✅ Governance report has all 6 sections (Exec Summary, by severity, by tool, metrics, risk-accepted, next-quarter goal)
+- ✅ ALL Risk-Accepted items have explicit expiry dates (Lecture 10 slide 12 — the "silent program killer" rule)
+- ✅ Next-quarter goal references a concrete SAMM practice with rationale
+
+### Bonus Task (2 pts)
+- ✅ `submissions/lab10-walkthrough.md` exists with all 6 timed sections
+- ✅ Script timed to ≤5 minutes when read aloud
+- ✅ Anticipates ≥2 Q&A questions with answers prepared
 
 ---
 
-## Guidelines
+## Rubric
 
-- Keep sensitive data out of uploads; use lab outputs only
-- Prefer JSON formats for robust importer support
-- If you explore deduplication, note the algorithm choice (helps explain numbers)
-- Be explicit when marking false positives (add justification)
-- Keep SLAs realistic but time-bound; reference calendar dates
+| Task | Points | Criteria |
+|------|-------:|----------|
+| **Task 1** — Setup + import | **6** | DefectDojo running + 6+ imports + dedup proof + counts |
+| **Task 2** — Governance | **4** | SLA matrix + 6-section report + risk-accepted-with-expiry discipline + SAMM-aligned next step |
+| **Bonus Task** — Walkthrough | **2** | Timed-to-5-min script + Q&A preparation |
+| **Total** | **12** | 10 main + 2 bonus |
+
+---
+
+## Resources
 
 <details>
-<summary>References</summary>
+<summary>📚 Documentation</summary>
 
-- DefectDojo: https://github.com/DefectDojo/django-DefectDojo
-- Importers list: check your UI Import Scan page for exact `scan_type` names
-- Local API v2 docs: http://localhost:8080/api/v2/doc/ (after startup)
-- Official docs (Open Source): https://docs.defectdojo.com/en/open_source/
-- CVSS v3.1 Calculator: https://www.first.org/cvss/calculator/3.1
+- [DefectDojo documentation](https://docs.defectdojo.com/) — Including importer formats
+- [DefectDojo API v2 reference](https://docs.defectdojo.com/api/) — For automation
+- [Supported scan types](https://docs.defectdojo.com/integrations/parsers/) — Match your file names to scan_type strings
+- [OWASP SAMM v2.0](https://owaspsamm.org/) — For the next-quarter-goal section
+- [DORA 2024 report](https://cloud.google.com/devops/state-of-devops/) — Benchmark MTTR against Elite performers
+
+</details>
+
+<details>
+<summary>⚠️ Common Pitfalls</summary>
+
+- 🚨 **`docker compose up -d` fails with OOM** — DefectDojo needs ~4GB RAM. Increase Docker Desktop memory or use a Linux host with more RAM.
+- 🚨 **Initializer never prints admin password** — the initializer runs only on first start. If you missed it: `docker compose down -v && docker compose up -d` to reset, OR query the postgres directly (see DefectDojo docs).
+- 🚨 **Import returns 400** — scan_type names are CASE-SENSITIVE. `Trivy Scan` (with space + capital T+S) is the canonical name. Use the Supported scan types reference link above.
+- 🚨 **Import succeeds but no findings appear** — your scan output is in the wrong format. Trivy default JSON is different from "Trivy operator" JSON — match the exact format DefectDojo expects.
+- 🚨 **SLA matrix doesn't apply to existing findings** — DefectDojo applies SLA at finding-creation time. Re-import (or use the bulk-update API) to back-fill SLAs on already-imported findings.
+- 🚨 **Closing a finding still shows as "active"** — closing a finding requires `is_mitigated=true` PATCH, AND the engagement must have an SLA assigned for the close-time math to compute.
+- 💡 **Skipping the bonus is a missed career opportunity.** The 5-minute walkthrough script is what you'll send recruiters in 6 months. Do it.
+
+</details>
+
+<details>
+<summary>🪜 Looking ahead — outside this course</summary>
+
+This is the capstone. There is no Lab 11/12 chain (the bonus labs 11 and 12 are different topics).
+**Your portfolio next step:**
+1. Save this DefectDojo dataset + governance report
+2. Apply the same lab patterns to a real OSS project of your choice
+3. The walkthrough script you produced today is what you'll customize for each interview
 
 </details>

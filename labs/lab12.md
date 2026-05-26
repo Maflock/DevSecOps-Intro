@@ -1,401 +1,380 @@
-# Lab 12 — Kata Containers: VM-backed Container Sandboxing (Local)
+# Lab 12 — BONUS — Kata Containers: VM-Backed Container Isolation
 
-![difficulty](https://img.shields.io/badge/difficulty-intermediate-orange)
-![topic](https://img.shields.io/badge/topic-Container%20Sandboxing-blue)
+![difficulty](https://img.shields.io/badge/difficulty-advanced-red)
+![topic](https://img.shields.io/badge/topic-VM%20Sandboxing-blue)
 ![points](https://img.shields.io/badge/points-10-orange)
+![tech](https://img.shields.io/badge/tech-Kata%20Containers-informational)
 
-> Goal: Run OWASP Juice Shop under Kata Containers to experience VM-backed container isolation, compare it with the default runc runtime, and document security/operational trade-offs.
-> Deliverable: A PR from `feature/lab12` with `labs/submission12.md` containing setup evidence, runtime comparisons (runc vs kata), isolation tests, and a brief performance summary with recommendations.
+> **Goal:** Install Kata Containers as a containerd runtime, run an attack scenario in both runc and kata, demonstrate the isolation difference, and measure performance overhead.
+> **Deliverable:** A PR from `feature/lab12` with `submissions/lab12.md` + captured outputs comparing the two runtimes. Submit PR link via Moodle.
+
+> 🌟 **This is a BONUS lab** — 10 pts total (Task 1: 6 + Task 2: 4), no separate bonus row.
+> Bonus labs count toward a separate **30% weight** in your final grade.
+> Difficulty is **advanced** — kernel/runtime layer; requires Linux host with KVM access.
 
 ---
 
 ## Overview
 
 In this lab you will practice:
-- Installing/Configuring Kata Containers as a Docker/containerd runtime (Linux)
-- Running the same workload (Juice Shop) with `runc` vs `kata-runtime`
-- Observing isolation differences (guest kernel, process visibility, restricted operations)
-- Measuring basic performance characteristics and trade-offs
+- **Kata Containers v3.x** — VM-backed container runtime under containerd (Lecture 7 mentioned container escapes; Kata is the defense-in-depth for that class)
+- **Isolation tests** — kernel CVE simulation, capability access, syscall surface
+- **Performance benchmark** — runc vs kata for startup time + CPU-bound + I/O-bound workloads
 
-> VM-backed sandboxes like Kata place each container/pod inside a lightweight VM, adding a strong isolation boundary while preserving container UX.
-
----
-
-## Prerequisites
-
-Before starting, ensure you have:
-- ✅ Linux host with hardware virtualization enabled (Intel VT-x or AMD-V)
-  - Check: `egrep -c '(vmx|svm)' /proc/cpuinfo` (should return > 0)
-  - Nested virtualization required if running inside a VM
-- ✅ containerd (1.7+) and nerdctl (1.7+) with root/sudo privileges
-- ✅ `jq`, `curl`, and `awk` installed
-- ✅ At least 4GB RAM and 10GB free disk space
-- ✅ ~60-90 minutes available (installation can take time)
-
-Install containerd + nerdctl (example on Debian/Ubuntu):
-```bash
-sudo apt-get update && sudo apt-get install -y containerd
-sudo containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
-sudo systemctl enable --now containerd
-
-# Install nerdctl (binary)
-VER=2.2.0
-curl -fL -o /tmp/nerdctl.tgz "https://github.com/containerd/nerdctl/releases/download/v${VER}/nerdctl-${VER}-linux-amd64.tar.gz"
-sudo tar -C /usr/local/bin -xzf /tmp/nerdctl.tgz nerdctl && rm /tmp/nerdctl.tgz
-
-containerd --version
-sudo nerdctl --version
-
-# Prepare working directories
-mkdir -p labs/lab12/{setup,runc,kata,isolation,bench,analysis}
-```
-
-If you plan to use the Kata assets installer, ensure `zstd` is available for extracting the release tarball:
-```bash
-sudo apt-get install -y zstd jq
-```
+> Recall Lecture 7 slide 14 — runc CVE-2024-21626 ("Leaky Vessels"): a single container escape affecting EVERY runc-based runtime. **Kata Containers wraps each container in a lightweight VM**, so a runc-style escape only escapes into a throwaway VM, not the host.
 
 ---
 
-## Tasks
+## Project State
 
-### Task 1 — Install and Configure Kata (2 pts)
-⏱️ **Estimated time:** 20-30 minutes
+**You should have from Labs 1+7:**
+- Familiarity with container fundamentals (Lab 7)
+- A Linux host with kernel ≥ 5.8 + KVM access (`/dev/kvm` exists + readable)
 
-**Objective:** Install Kata and make it available to containerd (nerdctl) as `io.containerd.kata.v2`.
+**This lab adds:**
+- Kata Containers installed + registered as a containerd runtime
+- Side-by-side run-comparison data (runc vs kata)
+- Performance + isolation analysis with real numbers
 
-#### 1.1: Install Kata
+> ⚠️ **macOS / Windows users:** Kata requires KVM, which doesn't work in Docker Desktop's Linux VM. Either:
+> 1. Spin up a Linux VM with nested virtualization (VirtualBox, VMware), OR
+> 2. Use a cloud VM with KVM (most providers — except low-end / `t2.micro`-style EC2 — support it), OR
+> 3. Use a bare-metal Linux machine
 
-- Build the Kata Rust runtime in a container and copy the shim to your host:
+---
+
+## Setup
+
+You need:
+- **Linux host with KVM**: `lsmod | grep kvm` should show kvm_intel or kvm_amd
+- **`/dev/kvm` readable**: `ls -la /dev/kvm` (add yourself to `kvm` group if needed)
+- **containerd + nerdctl** installed (most Linux distros via packages)
+- **`sudo`** (you'll install kata into `/opt`, modify `/etc/containerd/config.toml`)
 
 ```bash
-# Build inside a Rust container; output goes to labs/lab12/setup/kata-out/
-bash labs/lab12/setup/build-kata-runtime.sh
+git switch main && git pull
+git switch -c feature/lab12
 
-# Install the shim onto your host PATH (requires sudo)
-sudo install -m 0755 labs/lab12/setup/kata-out/containerd-shim-kata-v2 /usr/local/bin/
-command -v containerd-shim-kata-v2 && containerd-shim-kata-v2 --version | tee labs/lab12/setup/kata-built-version.txt
+# Verify KVM access
+lsmod | grep -E "kvm_intel|kvm_amd" && ls -la /dev/kvm
+# If you don't see either, you're not on a KVM-capable host — skip this lab
+
+# Verify containerd
+sudo systemctl status containerd
+nerdctl --version
+
+mkdir -p labs/lab12/results
 ```
 
-Notes:
-- The runtime alone is not sufficient; Kata also needs a guest kernel + rootfs image. Prefer your distro packages for these artifacts, or follow the upstream docs to obtain them. If you already have Kata installed, replacing just the shim binary is typically sufficient for this lab.
+> **Plumbing provided** (already in `labs/lab12/`):
+> - [`labs/lab12/scripts/install-kata-assets.sh`](lab12/scripts/install-kata-assets.sh) — downloads kata-static + configures
+> - [`labs/lab12/scripts/configure-containerd-kata.sh`](lab12/scripts/configure-containerd-kata.sh) — updates containerd config to register `kata` runtime
+> - [`labs/lab12/setup/build-kata-runtime.sh`](lab12/setup/build-kata-runtime.sh) — optional from-source build
 
-- Install Kata assets and default config (runtime-rs):
+---
+
+## Task 1 — Install + Run Identical Workload on Both Runtimes (6 pts)
+
+**Objective:** Install Kata, register it with containerd, then run the same Juice Shop container on both `runc` and `kata` runtimes. Capture proof.
+
+### 12.1: Install Kata
+
 ```bash
-sudo bash labs/lab12/scripts/install-kata-assets.sh        # downloads kata-static and wires configuration
-```
-  - If you see an error like "load TOML config failed" when running a Kata container, it means the default configuration file is missing. The script above creates `/etc/kata-containers/runtime-rs/configuration.toml` pointing to the installed defaults.
+sudo bash labs/lab12/scripts/install-kata-assets.sh
+# Downloads kata-static, installs to /opt/kata, registers OCI hooks
 
-#### 1.2: Configure containerd + nerdctl
-- Enable `io.containerd.kata.v2` per Kata docs (Kata 3’s shim is `containerd-shim-kata-v2`).
-- Minimal config example for config version 3 (most current containerd):
-```toml
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata]
-  runtime_type = 'io.containerd.kata.v2'
-```
-  - Legacy configs may use:
-```toml
-[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.kata]
-  runtime_type = 'io.containerd.kata.v2'
-```
+sudo bash labs/lab12/scripts/configure-containerd-kata.sh
+# Updates /etc/containerd/config.toml to add:
+#   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata]
+#     runtime_type = "io.containerd.kata.v2"
 
-Automated update (recommended):
-```bash
-sudo bash labs/lab12/scripts/configure-containerd-kata.sh           # updates /etc/containerd/config.toml
-```
-- Restart and verify a test container:
-```bash
 sudo systemctl restart containerd
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 uname -a
+
+# Verify kata is registered
+sudo ctr runtime ls 2>/dev/null || true
+# OR
+grep -A2 'runtimes.kata' /etc/containerd/config.toml
 ```
 
-In `labs/submission12.md`, document:
+### 12.2: Sanity test — hello-world on Kata
 
-**Task 1 Requirements:**
-- Show the shim `containerd-shim-kata-v2 --version`
-- Show a successful test run with `sudo nerdctl run --runtime io.containerd.kata.v2 ...`
+```bash
+sudo nerdctl run --runtime=io.containerd.kata.v2 --rm alpine:3.20 \
+  /bin/sh -c "uname -a; cat /proc/1/cgroup | head -3; ls /sys/devices/virtual/dmi/id/ 2>/dev/null || true"
+
+# Compare to runc — the kernel version will differ (Kata has its own mini-kernel)
+sudo nerdctl run --rm alpine:3.20 \
+  /bin/sh -c "uname -a; cat /proc/1/cgroup | head -3"
+```
+
+### 12.3: Run Juice Shop on both runtimes
+
+```bash
+# runc (default)
+sudo nerdctl run -d --name juice-runc \
+  -p 127.0.0.1:3000:3000 \
+  bkimminich/juice-shop:v20.0.0
+
+# kata
+sudo nerdctl run -d --name juice-kata \
+  --runtime=io.containerd.kata.v2 \
+  -p 127.0.0.1:3001:3000 \
+  bkimminich/juice-shop:v20.0.0
+
+# Verify both are running
+sudo nerdctl ps | grep juice
+```
+
+### 12.4: Capture proof
+
+```bash
+# kernel from inside each container
+sudo nerdctl exec juice-runc sh -c "uname -a; cat /proc/version" > labs/lab12/results/runc-kernel.txt
+sudo nerdctl exec juice-kata sh -c "uname -a; cat /proc/version" > labs/lab12/results/kata-kernel.txt
+
+# /proc/cpuinfo — different in a VM
+sudo nerdctl exec juice-runc sh -c "head -5 /proc/cpuinfo" > labs/lab12/results/runc-cpuinfo.txt
+sudo nerdctl exec juice-kata sh -c "head -5 /proc/cpuinfo" > labs/lab12/results/kata-cpuinfo.txt
+
+# diff them
+diff labs/lab12/results/runc-kernel.txt labs/lab12/results/kata-kernel.txt
+```
+
+### 12.5: Document in `submissions/lab12.md`
+
+```markdown
+# Lab 12 — BONUS — Submission
+
+## Task 1: Install + Compare
+
+### Host environment
+- Kernel: <output of `uname -a` on the host>
+- KVM accessible: <output of `ls -la /dev/kvm`>
+- containerd version: <output>
+
+### Kata installation
+- Kata version: <output of `/opt/kata/bin/kata-runtime --version`>
+- containerd config snippet (runtimes.kata block):
+```toml
+<paste relevant lines from /etc/containerd/config.toml>
+```
+
+### Kernel from inside containers
+runc:
+```
+<paste labs/lab12/results/runc-kernel.txt — should show your host kernel>
+```
+
+kata:
+```
+<paste labs/lab12/results/kata-kernel.txt — should show DIFFERENT kernel (Kata's mini-kernel, often older Linux)>
+```
+
+### Why the kernel differs (2-3 sentences)
+Reference Lecture 7 slide 4 — "container is a Linux process; shares kernel with host."
+Kata breaks that model. What does the kernel difference imply for the runc-CVE-2024-21626
+("Leaky Vessels") attack class?
+```
 
 ---
 
-### Task 2 — Run and Compare Containers (runc vs kata) (3 pts)
-⏱️ **Estimated time:** 15-20 minutes
+## Task 2 — Isolation Test + Performance Comparison (4 pts)
 
-**Objective:** Run workloads with both runtimes and compare their environments.
+**Objective:** Demonstrate one concrete isolation difference + measure performance overhead.
 
-#### 2.1: Start runc container (Juice Shop)
-```bash
-# runc (default under nerdctl) - full application
-sudo nerdctl run -d --name juice-runc -p 3012:3000 bkimminich/juice-shop:v19.0.0
-
-# Wait for readiness
-sleep 10
-curl -s -o /dev/null -w "juice-runc: HTTP %{http_code}\n" http://localhost:3012 | tee labs/lab12/runc/health.txt
-```
-
-#### 2.2: Run Kata containers (Alpine-based tests)
-
-> **Note:** Due to a known issue with nerdctl + Kata runtime-rs v3 and long-running detached containers,
-> we'll use short-lived Alpine containers for Kata demonstrations.
+### 12.6: Isolation test
 
 ```bash
-echo "=== Kata Container Tests ==="
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 uname -a | tee labs/lab12/kata/test1.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 uname -r | tee labs/lab12/kata/kernel.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 sh -c "grep 'model name' /proc/cpuinfo | head -1" | tee labs/lab12/kata/cpu.txt
+# Test: can the container see host devices? (one indicator of kernel sharing)
+sudo nerdctl exec juice-runc ls /dev | head -20 > labs/lab12/results/runc-devs.txt
+sudo nerdctl exec juice-kata ls /dev | head -20 > labs/lab12/results/kata-devs.txt
+diff labs/lab12/results/runc-devs.txt labs/lab12/results/kata-devs.txt | tee labs/lab12/results/dev-diff.txt
+
+# Test: kernel module visibility
+sudo nerdctl exec juice-runc sh -c "lsmod 2>/dev/null | head -10 || echo 'no lsmod'" \
+  > labs/lab12/results/runc-lsmod.txt
+sudo nerdctl exec juice-kata sh -c "lsmod 2>/dev/null | head -10 || echo 'no lsmod'" \
+  > labs/lab12/results/kata-lsmod.txt
 ```
 
-#### 2.3: Kernel comparison (Key finding)
+### 12.7: Performance benchmark — startup time
 
 ```bash
-echo "=== Kernel Version Comparison ===" | tee labs/lab12/analysis/kernel-comparison.txt
-echo -n "Host kernel (runc uses this): " | tee -a labs/lab12/analysis/kernel-comparison.txt
-uname -r | tee -a labs/lab12/analysis/kernel-comparison.txt
-
-echo -n "Kata guest kernel: " | tee -a labs/lab12/analysis/kernel-comparison.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 cat /proc/version | tee -a labs/lab12/analysis/kernel-comparison.txt
+# Cold start time — average of 5 runs
+for runtime in runc kata; do
+  sudo nerdctl rm -f bench 2>/dev/null
+  RUNTIME_FLAG=""
+  [ "$runtime" = "kata" ] && RUNTIME_FLAG="--runtime=io.containerd.kata.v2"
+  echo "=== $runtime ==="
+  for i in 1 2 3 4 5; do
+    START=$(date +%s.%N)
+    sudo nerdctl run --rm $RUNTIME_FLAG alpine:3.20 echo "hello" > /dev/null
+    END=$(date +%s.%N)
+    echo "$i: $(echo "$END - $START" | bc) s"
+  done
+done | tee labs/lab12/results/startup-bench.txt
 ```
 
-#### 2.4: CPU virtualization check
+### 12.8: CPU-bound + I/O-bound
 
 ```bash
-echo "=== CPU Model Comparison ===" | tee labs/lab12/analysis/cpu-comparison.txt
-echo "Host CPU:" | tee -a labs/lab12/analysis/cpu-comparison.txt
-grep "model name" /proc/cpuinfo | head -1 | tee -a labs/lab12/analysis/cpu-comparison.txt
-
-echo "Kata VM CPU:" | tee -a labs/lab12/analysis/cpu-comparison.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 sh -c "grep 'model name' /proc/cpuinfo | head -1" | tee -a labs/lab12/analysis/cpu-comparison.txt
+# CPU-bound: 5M-iteration loop
+for runtime in runc kata; do
+  RUNTIME_FLAG=""
+  [ "$runtime" = "kata" ] && RUNTIME_FLAG="--runtime=io.containerd.kata.v2"
+  echo "=== $runtime CPU ==="
+  sudo nerdctl run --rm $RUNTIME_FLAG alpine:3.20 \
+    sh -c 'i=0; while [ $i -lt 5000000 ]; do i=$((i+1)); done; echo done'
+done > /dev/null   # we just care about the timing
+time sudo nerdctl run --rm alpine:3.20 sh -c 'i=0; while [ $i -lt 5000000 ]; do i=$((i+1)); done'
+# Compare runtime variants — paste both into submission
 ```
-
-In `labs/submission12.md`, document:
-
-**Task 2 Requirements:**
-- Show juice-runc health check (HTTP 200 from port 3012)
-- Show Kata containers running successfully with `--runtime io.containerd.kata.v2`
-- Compare kernel versions:
-  - runc uses host kernel (same as `uname -r`)
-  - Kata uses separate guest kernel (6.12.47 or similar)
-- Compare CPU models (real vs virtualized)
-- Explain isolation implications:
-  - **runc**: ?
-  - **Kata**: ?
-
----
-
-### Task 3 — Isolation Tests (3 pts)
-⏱️ **Estimated time:** 15 minutes
-
-**Objective:** Observe and compare isolation characteristics between runc and Kata.
-
-#### 3.1: Kernel ring buffer (dmesg) access
-
-This demonstrates the most significant isolation difference:
 
 ```bash
-echo "=== dmesg Access Test ===" | tee labs/lab12/isolation/dmesg.txt
-
-echo "Kata VM (separate kernel boot logs):" | tee -a labs/lab12/isolation/dmesg.txt  
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 dmesg 2>&1 | head -5 | tee -a labs/lab12/isolation/dmesg.txt
+# I/O-bound: dd 100MB of /dev/zero to /dev/null
+for runtime in runc kata; do
+  RUNTIME_FLAG=""
+  [ "$runtime" = "kata" ] && RUNTIME_FLAG="--runtime=io.containerd.kata.v2"
+  echo "=== $runtime I/O ==="
+  sudo nerdctl run --rm $RUNTIME_FLAG alpine:3.20 \
+    sh -c 'dd if=/dev/zero of=/dev/null bs=1M count=100 2>&1' | grep "copied"
+done | tee labs/lab12/results/io-bench.txt
 ```
 
-**Key observation:** Kata containers show VM boot logs, proving they run in a separate kernel.
+### 12.9: Document in `submissions/lab12.md`
 
-#### 3.2: /proc filesystem visibility
+```markdown
+## Task 2: Isolation + Performance
 
-```bash
-echo "=== /proc Entries Count ===" | tee labs/lab12/isolation/proc.txt
-
-echo -n "Host: " | tee -a labs/lab12/isolation/proc.txt
-ls /proc | wc -l | tee -a labs/lab12/isolation/proc.txt
-
-echo -n "Kata VM: " | tee -a labs/lab12/isolation/proc.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 sh -c "ls /proc | wc -l" | tee -a labs/lab12/isolation/proc.txt
+### Isolation: /dev contents
+diff between runc /dev and kata /dev:
+```
+<paste labs/lab12/results/dev-diff.txt>
 ```
 
-#### 3.3: Network interfaces
-
-```bash
-echo "=== Network Interfaces ===" | tee labs/lab12/isolation/network.txt
-
-echo "Kata VM network:" | tee -a labs/lab12/isolation/network.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 ip addr | tee -a labs/lab12/isolation/network.txt
+### Isolation: lsmod
+runc lsmod output (first 10 lines):
+```
+<paste — should show host kernel modules>
+```
+kata lsmod output:
+```
+<paste — should show minimal mini-kernel modules OR "no lsmod" because Kata's image lacks it>
 ```
 
-#### 3.4: Kernel modules
+### Startup time (avg of 5 runs)
+| Runtime | Avg startup time (s) |
+|---------|---------------------:|
+| runc | <e.g. 0.45s> |
+| kata | <e.g. 2.10s> |
 
-```bash
-echo "=== Kernel Modules Count ===" | tee labs/lab12/isolation/modules.txt
+**Overhead: <kata - runc>s (~5x typical for cold starts)**
 
-echo -n "Host kernel modules: " | tee -a labs/lab12/isolation/modules.txt
-ls /sys/module | wc -l | tee -a labs/lab12/isolation/modules.txt
+### CPU-bound
+| Runtime | Time (s) |
+|---------|---------:|
+| runc | <e.g. 8.2s> |
+| kata | <e.g. 8.4s> |
 
-echo -n "Kata guest kernel modules: " | tee -a labs/lab12/isolation/modules.txt
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 sh -c "ls /sys/module 2>/dev/null | wc -l" | tee -a labs/lab12/isolation/modules.txt
-```
+### I/O-bound (100MB dd through pipe)
+| Runtime | Throughput |
+|---------|-----------|
+| runc | <e.g. 12.5 GB/s> |
+| kata | <e.g. 1.2 GB/s> |
 
-In `labs/submission12.md`, document:
+### Trade-off analysis (3-4 sentences)
+Kata costs you startup time + I/O throughput. When is the security gain (separate kernel,
+runc-CVE class blocked) worth that cost? When isn't it? Give one example each (e.g.,
+"multi-tenant SaaS workloads = yes; single-tenant batch jobs = no").
 
-**Task 3 Requirements:**
-- Show dmesg output differences (Kata shows VM boot logs, proving separate kernel)
-- Compare /proc filesystem visibility
-- Show network interface configuration in Kata VM
-- Compare kernel module counts (host vs guest VM)
-- Explain isolation boundary differences:
-  - **runc**: ?
-  - **kata**: ?
-- Discuss security implications:
-  - Container escape in runc = ?
-  - Container escape in Kata = ?
-
----
-
-### Task 4 — Performance Comparison (2 pts)
-⏱️ **Estimated time:** 10 minutes
-
-**Objective:** Compare startup time and overhead between runc and Kata.
-
-#### 4.1: Container startup time comparison
-
-```bash
-echo "=== Startup Time Comparison ===" | tee labs/lab12/bench/startup.txt
-
-echo "runc:" | tee -a labs/lab12/bench/startup.txt
-time sudo nerdctl run --rm alpine:3.19 echo "test" 2>&1 | grep real | tee -a labs/lab12/bench/startup.txt
-
-echo "Kata:" | tee -a labs/lab12/bench/startup.txt
-time sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 echo "test" 2>&1 | grep real | tee -a labs/lab12/bench/startup.txt
-```
-
-#### 4.2: HTTP response latency (juice-runc only)
-
-```bash
-echo "=== HTTP Latency Test (juice-runc) ===" | tee labs/lab12/bench/http-latency.txt
-out="labs/lab12/bench/curl-3012.txt"
-: > "$out"
-
-for i in $(seq 1 50); do
-  curl -s -o /dev/null -w "%{time_total}\n" http://localhost:3012/ >> "$out"
-done
-
-echo "Results for port 3012 (juice-runc):" | tee -a labs/lab12/bench/http-latency.txt
-awk '{s+=$1; n+=1} END {if(n>0) printf "avg=%.4fs min=%.4fs max=%.4fs n=%d\n", s/n, min, max, n}' \
-  min=$(sort -n "$out" | head -1) max=$(sort -n "$out" | tail -1) "$out" | tee -a labs/lab12/bench/http-latency.txt
-```
-
-In `labs/submission12.md`, document:
-
-**Task 4 Requirements:**
-- Show startup time comparison (runc: <1s, Kata: 3-5s)
-- Show HTTP latency for juice-runc baseline
-- Analyze performance tradeoffs:
-  - **Startup overhead**: ?
-  - **Runtime overhead**: ?
-  - **CPU overhead**: ?
-- Interpret when to use each:
-  - **Use runc when**: ?
-  - **Use Kata when**: ?
-
----
-
-## Acceptance Criteria
-
-- ✅ Kata shim installed and verified (`containerd-shim-kata-v2 --version`)
-- ✅ containerd configured; runtime `io.containerd.kata.v2` used for `juice-kata`
-- ✅ runc vs kata containers both reachable; environment differences captured
-- ✅ Isolation tests executed and results summarized
-- ✅ Basic latency snapshot recorded and discussed
-- ✅ All artifacts saved under `labs/lab12/` and committed
-
----
-
-## Known Issues and Troubleshooting
-
-### nerdctl + Kata runtime-rs detached container issue
-
-**Symptom:** Long-running detached containers fail with:
-```
-FATA[0001] failed to create shim task: Others("failed to handle message create container
-Caused by:
-    0: open stdout
-    1: No such file or directory (os error 2)
-```
-
-**Root Cause:** Race condition in logging initialization between nerdctl and Kata runtime-rs v3.
-
-**Workarounds:**
-1. Use short-lived/interactive containers (as in this lab)
-2. Use Kubernetes with Kata (fully supported)
-3. Use Docker with older Kata versions
-4. Use containerd's `ctr` command directly
-
-**Status:** Known issue, fix expected in future releases.
-
-### Verifying Kata is working
-
-If you encounter issues, verify Kata basics:
-
-```bash
-# Test simple execution
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 echo "Kata works"
-
-# Check kernel version (should be 6.12.47 or similar, NOT your host kernel)
-sudo nerdctl run --rm --runtime io.containerd.kata.v2 alpine:3.19 uname -r
-
-# Check Kata shim
-ls -la /usr/local/bin/containerd-shim-kata-v2
-containerd-shim-kata-v2 --version
-
-# Check containerd logs
-sudo journalctl -u containerd -n 50 --no-pager | grep -i kata
+### When you'd actually deploy Kata (1 paragraph)
+Reference Lecture 7 + runc CVE-2024-21626. In what production scenarios would the
+security team push for Kata adoption? What blocks adoption today (cost? operational complexity?
+ecosystem support?)?
 ```
 
 ---
 
 ## How to Submit
 
-1. Create a branch and push it to your fork:
 ```bash
-git switch -c feature/lab12
-# create labs/submission12.md with your findings
-git add labs/lab12/ labs/submission12.md
-git commit -m "docs: add lab12 — kata containers sandboxing"
+git add submissions/lab12.md
+git commit -m "feat(lab12): kata vs runc isolation + perf comparison"
 git push -u origin feature/lab12
+
+# Cleanup
+sudo nerdctl rm -f juice-runc juice-kata
 ```
-2. Open a PR from your fork’s `feature/lab12` → course repo’s `main`.
-3. In the PR description include:
+
+PR checklist body:
+
 ```text
-- [x] Task 1 — Kata install + runtime config
-- [x] Task 2 — runc vs kata runtime comparison
-- [x] Task 3 — Isolation tests
-- [x] Task 4 — Basic performance snapshot
+- [x] Task 1 — Kata installed, registered, hello-world + Juice Shop running on both, kernel diff documented
+- [ ] Task 2 — Isolation test + startup + CPU + I/O benchmarks + trade-off analysis
 ```
-4. Submit the PR URL via Moodle before the deadline.
 
 ---
 
-## Rubric (10 pts)
+## Acceptance Criteria
 
-| Criterion                                              | Points |
-| ------------------------------------------------------ | -----: |
-| Task 1 — Install + Configure Kata                      |    2.0 |
-| Task 2 — Run and Compare (runc vs kata)                |    3.0 |
-| Task 3 — Isolation Tests                               |    3.0 |
-| Task 4 — Performance Snapshot                          |    2.0 |
-| Total                                                  |   10.0 |
+### Task 1 (6 pts)
+- ✅ Kata installed; `kata-runtime --version` returns 3.x
+- ✅ containerd config includes the `runtimes.kata` block
+- ✅ Both `juice-runc` and `juice-kata` containers running concurrently
+- ✅ Kernel inside containers documented for BOTH runtimes; diff shows they differ
+- ✅ "Why the kernel differs" answer correctly maps to Lecture 7 + runc CVE class
+
+### Task 2 (4 pts)
+- ✅ /dev diff or lsmod difference documented (isolation evidence)
+- ✅ Startup time measured for both (5 runs averaged)
+- ✅ CPU + I/O benchmarks captured for both
+- ✅ Trade-off analysis has both "would deploy" and "wouldn't deploy" scenarios with reasoning
+- ✅ Production-deployment reflection addresses operational complexity / ecosystem support honestly
 
 ---
 
-## Guidelines
+## Rubric
 
-- Prefer non-privileged containers; avoid `--privileged` unless a test explicitly calls for it
-- Use containerd+nerdctl with `io.containerd.kata.v2` per Kata 3 docs (Docker `--runtime=kata` is legacy)
-- Nested virtualization must be enabled if inside a VM (check your cloud provider or hypervisor settings)
-- Use clear, concise evidence in `submission12.md` and focus your analysis on isolation trade-offs vs operational overhead
+| Task | Points | Criteria |
+|------|-------:|----------|
+| **Task 1** — Install + run | **6** | Kata working + both containers running + kernel-diff with explanation |
+| **Task 2** — Isolation + perf | **4** | /dev diff + 3 benchmarks (startup, CPU, I/O) + production-trade-off analysis |
+| **Total** | **10** | (No bonus row — this IS the bonus lab) |
+
+---
+
+## Resources
 
 <details>
-<summary>References</summary>
+<summary>📚 Documentation</summary>
 
-- Kata Containers: https://github.com/kata-containers/kata-containers
-- Install docs (Kata 3): https://github.com/kata-containers/kata-containers/tree/main/docs/install
-- containerd runtime config: https://github.com/kata-containers/kata-containers/tree/main/docs
+- [Kata Containers documentation](https://katacontainers.io/docs/) — Project docs
+- [Kata Containers architecture](https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md) — How the VM-per-container model works
+- [containerd runtimes integration](https://github.com/containerd/containerd/blob/main/docs/cri/config.md#runtime-classes) — Where Kata plugs in
+- [Linux KVM documentation](https://www.kernel.org/doc/html/latest/virt/kvm/index.html) — The hypervisor Kata uses
+- [Lecture 7 slide 14: runc CVE-2024-21626](#) — The case that motivates this lab
+
+</details>
+
+<details>
+<summary>⚠️ Common Pitfalls</summary>
+
+- 🚨 **`ls /dev/kvm: No such file or directory`** — you're not on a KVM-capable host. Linux on bare metal works; Docker Desktop's Linux VM doesn't; cloud VMs vary (most enable KVM; older `t2.micro`-style EC2s do not).
+- 🚨 **`Permission denied on /dev/kvm`** — `sudo usermod -aG kvm $USER && newgrp kvm` to add yourself to the kvm group, OR run nerdctl with `sudo`.
+- 🚨 **Container starts on kata but `juice-shop` never becomes healthy** — Kata's nested networking adds latency. Juice Shop on Kata might take 60-90s to start (vs ~20s on runc). Don't conclude "Kata is broken" — wait longer.
+- 🚨 **`nerdctl run --runtime=...` fails with "no such runtime"** — verify containerd reloaded the config: `sudo systemctl restart containerd` (you ran this in 12.1; if you edited config since, re-run).
+- 🚨 **dd reports MB/s on runc but B/s on kata** — different output formats due to dd timing. Use `| grep "copied"` to extract the rate line consistently.
+- 🚨 **Benchmark numbers vary wildly between runs** — KVM startup is unstable for the first few runs (warming caches). Discard the first 1-2 runs in your average.
+- 💡 **If the lab is impossible on your laptop**: spin up a cloud VM ($1-2 for a few hours of work). c6i.xlarge on AWS, n2-standard-4 on GCP — both support KVM.
+
+</details>
+
+<details>
+<summary>🪜 Looking outside this course</summary>
+
+- **gVisor** is another sandboxed-container runtime — user-space syscall emulation (no KVM needed) but higher CPU overhead. Read [gVisor docs](https://gvisor.dev/docs/) for comparison.
+- **Firecracker** is AWS's bare-bones VMM, also used as a container runtime by some platforms (Fly.io). Lighter than Kata, less ecosystem support.
+- **Confidential Containers (CoCo)** is the next frontier — uses Intel SGX/TDX or AMD SEV to encrypt the VM memory. The "VM-isolation" defense layer of 2027.
+- **In your portfolio**: "I evaluated Kata Containers vs runc for sandboxed workloads, measured 5× cold-start overhead vs near-zero CPU overhead" is a strong interview line. Reference your specific benchmark numbers.
 
 </details>

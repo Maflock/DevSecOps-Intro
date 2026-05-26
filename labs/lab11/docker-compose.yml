@@ -1,6 +1,6 @@
 services:
   juice:
-    image: bkimminich/juice-shop:v19.0.0
+    image: bkimminich/juice-shop:v20.0.0
     restart: unless-stopped
     expose:
       - "3000"

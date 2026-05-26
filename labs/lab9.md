@@ -1,53 +1,79 @@
-# Lab 9 — Monitoring & Compliance: Falco Runtime Detection + Conftest Policies
+# Lab 9 — Runtime Detection (Falco) + Policy-as-Code (Conftest)
 
-![difficulty](https://img.shields.io/badge/difficulty-intermediate-orange)
-![topic](https://img.shields.io/badge/topic-Monitoring%20%26%20Compliance-blue)
-![points](https://img.shields.io/badge/points-10-orange)
+![difficulty](https://img.shields.io/badge/difficulty-intermediate-yellow)
+![topic](https://img.shields.io/badge/topic-Runtime%20%2B%20PaC-blue)
+![points](https://img.shields.io/badge/points-10%2B2-orange)
+![tech](https://img.shields.io/badge/tech-Falco%20%2B%20Conftest-informational)
 
-> Goal: Detect suspicious container behavior with Falco and enforce deployment hardening via policy-as-code using Conftest (Rego) — all runnable locally.
-> Deliverable: A PR from `feature/lab9` with `labs/submission9.md` containing Falco alert evidence, custom rule/tuning notes, Conftest test results, and analysis of provided manifests/policies. Submit the PR link via Moodle.
+> **Goal:** Run Falco with modern eBPF, trigger baseline + custom alerts, then write Conftest/Rego policies that gate Kubernetes manifests at CI time. (Bonus) Write a Falco rule that detects a specific attacker pattern.
+> **Deliverable:** A PR from `feature/lab9` with `submissions/lab9.md` + custom Falco rule(s) + Conftest policies. Submit PR link via Moodle.
 
 ---
 
 ## Overview
 
 In this lab you will practice:
-- Runtime threat detection for containers with Falco (eBPF)
-- Writing/customizing Falco rules and tuning noise/false positives
-- Policy-as-code with Conftest (OPA/Rego) against Kubernetes manifests
-- Analyzing how security policies enforce deployment hardening best practices
+- **Falco v0.43.x** runtime detection via modern eBPF (Lecture 9 slides 5-8)
+- **Custom Falco rules** with `condition:` + `exceptions:` (Lecture 9 slide 8)
+- **Conftest / Rego** for K8s admission policy (Lecture 9 slides 9-10)
+- (Bonus) **Cryptominer-style detection** — a Falco rule that catches network egress to known mining-pool patterns
 
-> Runtime target for Task 1: BusyBox helper container (`alpine:3.19`).
-
----
-
-## Prerequisites
-
-- Docker (or Docker Desktop)
-- `jq`
-- Optional: `kubectl` or a local K8s (kind/minikube) is NOT required — Conftest runs offline against YAML
-
-Prepare working directories:
-```bash
-mkdir -p labs/lab9/{falco/{rules,logs},analysis}
-```
+> Lecture 9 slide 6 — Falco is "the runtime equivalent of grep — fast, predictable, composable." This lab is where you actually wield it.
 
 ---
 
-## Tasks
+## Project State
 
-### Task 1 — Runtime Security Detection with Falco (6 pts)
-**Objective:** Run Falco with modern eBPF, trigger alerts from a shell-enabled BusyBox container, and add one custom rule with basic tuning.
+**You should have from Labs 1-8:**
+- Juice Shop image (Lab 1), hardened K8s deployment from Lab 7 (or you'll re-deploy)
+- Lab 7's Conftest preview (this lab goes deep on it)
 
-#### 1.1: Start a shell-enabled helper container
+**This lab adds:**
+- Falco running in a container with custom rules
+- Captured Falco alerts proving runtime detection works
+- Conftest policies gating ≥3 hardening requirements at CI time
+
+---
+
+## Setup
+
+You need:
+- **Docker** (Falco runs containerized)
+- **`jq`**
+- **`conftest`** v0.68.x — `brew install conftest` (Lab 7 bonus used this if you did it)
+- **Linux host with kernel ≥ 5.8** (for modern eBPF). On macOS/Windows, Docker Desktop's Linux VM is fine
+
 ```bash
-# Use Alpine (BusyBox) to trigger events — no app needed
-docker run -d --name lab9-helper alpine:3.19 sleep 1d
+git switch main && git pull
+git switch -c feature/lab9
+
+# Verify
+docker --version && conftest --version
+
+mkdir -p labs/lab9/{falco/{rules,logs},policies/extra,analysis}
 ```
 
-#### 1.2: Run Falco (containerized) with modern eBPF
+> **Plumbing provided** (already in `labs/lab9/`):
+> - [`labs/lab9/manifests/`](lab9/manifests/) — sample K8s manifests of varying compliance (pass + fail cases)
+> - [`labs/lab9/policies/`](lab9/policies/) — starter Conftest policies (you'll extend them)
+>
+> Read these files before writing your own — they show the Rego style + sample manifest shape.
+
+---
+
+## Task 1 — Runtime Detection with Falco (6 pts)
+
+**Objective:** Run Falco against a target container, trigger 2 baseline alerts + 1 custom alert.
+
+### 9.1: Start the target container
+
 ```bash
-# Start Falco container (JSON output to stdout)
+docker run -d --name lab9-target alpine:3.20 sleep 1d
+```
+
+### 9.2: Run Falco with modern eBPF
+
+```bash
 docker run -d --name falco \
   --privileged \
   -v /proc:/host/proc:ro \
@@ -56,184 +82,354 @@ docker run -d --name falco \
   -v /usr:/host/usr:ro \
   -v /var/run/docker.sock:/host/var/run/docker.sock \
   -v "$(pwd)/labs/lab9/falco/rules":/etc/falco/rules.d:ro \
-  falcosecurity/falco:latest \
+  falcosecurity/falco:0.43.1 \
   falco -U \
         -o json_output=true \
         -o time_format_iso_8601=true
 
-# Follow Falco logs
-docker logs -f falco | tee labs/lab9/falco/logs/falco.log &
+# Follow Falco logs in a separate terminal OR background it
+docker logs -f falco > labs/lab9/falco/logs/falco.log 2>&1 &
+LOGS_PID=$!
+echo "Falco logs tail PID: $LOGS_PID — kill it when done"
+
+# Give Falco a moment to initialize
+sleep 5
 ```
 
-Note: The official Falco image defaults to the modern eBPF engine (engine.kind=modern_ebpf). No extra flag is needed beyond running with the required privileges and mounts.
+### 9.3: Trigger 2 baseline alerts
 
-#### 1.3: Trigger two baseline alerts
 ```bash
-# A) Terminal shell inside container (expected rule: Terminal shell in container)
-docker exec -it lab9-helper /bin/sh -lc 'echo hello-from-shell'
+# Trigger A: Terminal shell in container — built-in rule
+docker exec -it lab9-target /bin/sh -lc 'echo "shell-in-container test"'
 
-# B) Container drift: write under a binary directory
-# Writes to /usr/local/bin should trigger Falco's drift detection
-docker exec --user 0 lab9-helper /bin/sh -lc 'echo boom > /usr/local/bin/drift.txt'
+# Trigger B: Container drift — write under /usr/local/bin
+docker exec --user 0 lab9-target /bin/sh -lc 'echo "drift" > /usr/local/bin/drift.txt'
+
+# Wait a few seconds, then check Falco alerts
+sleep 3
+grep -E "(Terminal shell|Write below)" labs/lab9/falco/logs/falco.log | head -10
 ```
 
-#### 1.4: Add one custom Falco rule and validate
+### 9.4: Write 1 custom Falco rule
+
 Create `labs/lab9/falco/rules/custom-rules.yaml`:
+
 ```yaml
-# Detect new writable file under /usr/local/bin inside any container
-- rule: Write Binary Under UsrLocalBin
-  desc: Detects writes under /usr/local/bin inside any container
-  condition: evt.type in (open, openat, openat2, creat) and 
-             evt.is_open_write=true and 
-             fd.name startswith /usr/local/bin/ and 
-             container.id != host
-  output: >
-    Falco Custom: File write in /usr/local/bin (container=%container.name user=%user.name file=%fd.name flags=%evt.arg.flags)
-  priority: WARNING
-  tags: [container, compliance, drift]
+# YOUR TASK: Write a custom Falco rule
+# Requirements (Lecture 9 slide 7):
+#   - rule: "Write to /tmp by container"
+#   - condition: detects writes to /tmp inside any container (NOT host)
+#   - output: should include container.name + user.name + fd.name + proc.cmdline
+#   - priority: WARNING
+#   - tags: [container, drift]
+#
+# Hint: existing default rules write under /usr/local/bin — yours is similar but
+#       /tmp is a different path. Look at /etc/falco/falco_rules.yaml for the macro
+#       open_write to understand the syntax.
 ```
 
-Falco auto-reloads rules in `/etc/falco/rules.d`. If you don't see your custom alert after a minute, force a reload:
+Falco auto-reloads rules in `/etc/falco/rules.d/`. To force reload after editing:
+
 ```bash
-docker kill --signal=SIGHUP falco && sleep 2
+docker kill --signal=SIGHUP falco && sleep 3
 ```
 
-Validate the custom rule by triggering another write:
+### 9.5: Trigger your custom rule
+
 ```bash
-# This should trigger BOTH the built-in drift rule AND your custom rule
-docker exec --user 0 lab9-helper /bin/sh -lc 'echo custom-test > /usr/local/bin/custom-rule.txt'
+docker exec --user 0 lab9-target /bin/sh -lc 'echo "test" > /tmp/my-write.txt'
+sleep 3
+grep "Write to /tmp by container" labs/lab9/falco/logs/falco.log | head -5
 ```
 
-#### 1.5: Generate Falco test events
-```bash
-# Falco event generator creates a short burst of detectable actions
-docker run --rm --name eventgen \
-  --privileged \
-  -v /proc:/host/proc:ro -v /dev:/host/dev \
-  falcosecurity/event-generator:latest run syscall
-```
-<details>
-<summary>What this does</summary>
-Executes a curated set of syscalls (e.g., fileless execution, sensitive file reads) that should appear as Falco alerts. This helps verify your Falco setup is working correctly.
-</details>
+### 9.6: Document in `submissions/lab9.md`
 
-In `labs/submission9.md`, document:
-- Baseline alerts observed from `falco.log`
-- Your custom rule’s purpose and when it should/shouldn’t fire
+```markdown
+# Lab 9 — Submission
+
+## Task 1: Runtime Detection with Falco
+
+### Baseline alert A — Terminal shell in container
+JSON alert from Falco logs (paste the most relevant lines):
+```json
+<paste>
+```
+
+### Baseline alert B — Container drift (write below binary dir)
+```json
+<paste>
+```
+
+### Custom rule (paste labs/lab9/falco/rules/custom-rules.yaml)
+```yaml
+<paste full rule>
+```
+
+### Custom rule fired
+Falco log line showing your custom rule:
+```json
+<paste>
+```
+
+### Tuning consideration (Lecture 9 slide 8)
+Your custom "write to /tmp" rule will fire on legitimate uses too (logging frameworks
+often write to /tmp). What's your tuning approach? (2-3 sentences referencing the
+`exceptions:` block vs `and not proc.name=...` patterns from Lecture 9.)
+```
 
 ---
 
-### Task 2 — Policy-as-Code with Conftest (Rego) (4 pts)
-**Objective:** Run provided security policies against K8s manifests, analyze policy violations, and understand how hardening satisfies compliance requirements.
+## Task 2 — Conftest Policy-as-Code (4 pts)
 
-#### 2.1: Review provided Kubernetes manifests
-Open and review the provided manifests:
-- `labs/lab9/manifests/k8s/juice-unhardened.yaml` (baseline — do NOT edit)
-- `labs/lab9/manifests/k8s/juice-hardened.yaml` (compliant version)
+> ⏭️ Optional. Skipping won't affect future labs.
 
-Compare both manifests to understand what hardening changes were applied.
+**Objective:** Write Rego policies for Conftest that catch ≥3 K8s manifest hardening issues at CI time.
 
-#### 2.2: Review provided Conftest Rego policies
-Examine the provided security policies:
-- `labs/lab9/policies/k8s-security.rego` — enforces Kubernetes security best practices
-- `labs/lab9/policies/compose-security.rego` — enforces Docker Compose security patterns
+### 9.7: Read the provided manifests + starter policies
 
-These policies check for common misconfigurations like running as root, missing resource limits, privileged containers, etc.
-
-#### 2.3: Run Conftest against both manifests
 ```bash
-# Test unhardened manifest (expect policy violations)
-docker run --rm -v "$(pwd)/labs/lab9":/project \
-  openpolicyagent/conftest:latest \
-  test /project/manifests/k8s/juice-unhardened.yaml -p /project/policies --all-namespaces | tee labs/lab9/analysis/conftest-unhardened.txt
+ls labs/lab9/manifests/
+# Should show: good-pod.yaml, bad-pod-runasroot.yaml, bad-pod-no-resources.yaml, etc.
 
-# Test hardened manifest (should pass or only warnings)
-docker run --rm -v "$(pwd)/labs/lab9":/project \
-  openpolicyagent/conftest:latest \
-  test /project/manifests/k8s/juice-hardened.yaml -p /project/policies --all-namespaces | tee labs/lab9/analysis/conftest-hardened.txt
+ls labs/lab9/policies/
+# Should show: starter Rego files demonstrating Conftest patterns
 
-# Test Docker Compose manifest
-docker run --rm -v "$(pwd)/labs/lab9":/project \
-  openpolicyagent/conftest:latest \
-  test /project/manifests/compose/juice-compose.yml -p /project/policies --all-namespaces | tee labs/lab9/analysis/conftest-compose.txt
+cat labs/lab9/policies/*.rego
+# Read the starter policies — your task extends them
 ```
 
-In `labs/submission9.md`, document:
-- The policy violations from the unhardened manifest and why each matters for security
-- The specific hardening changes in the hardened manifest that satisfy policies
-- Analysis of the Docker Compose manifest results
+### 9.8: Write your Conftest policies
+
+Add to `labs/lab9/policies/extra/`:
+
+```rego
+# labs/lab9/policies/extra/hardening.rego
+# YOUR TASK: Rego policies for 3+ K8s hardening rules
+# Required denies (one Rego rule per requirement):
+#   1. runAsNonRoot must be true (pod-level or container-level securityContext)
+#   2. allowPrivilegeEscalation must be false (every container)
+#   3. capabilities.drop must include "ALL" (every container)
+#   4. (optional 4th) resources.limits.memory must be set
+#   5. (optional 5th) image must use sha256: digest, not :tag
+#
+# Hints:
+#   - Lecture 9 slide 10 shows the deny[msg] pattern
+#   - `not <something>` is your friend
+#   - For arrays: `not "ALL" in container.securityContext.capabilities.drop`
+#     (requires Rego v1 — recent OPA/Conftest versions)
+```
+
+### 9.9: Run Conftest against good + bad manifests
+
+```bash
+# Good manifest — should PASS
+conftest test labs/lab9/manifests/good-pod.yaml \
+  --policy labs/lab9/policies/extra/
+
+# Bad manifest #1 — should FAIL with deny messages
+conftest test labs/lab9/manifests/bad-pod-runasroot.yaml \
+  --policy labs/lab9/policies/extra/
+
+# Bad manifest #2 — should FAIL
+conftest test labs/lab9/manifests/bad-pod-no-resources.yaml \
+  --policy labs/lab9/policies/extra/
+```
+
+### 9.10: Document in `submissions/lab9.md`
+
+```markdown
+## Task 2: Conftest Policy-as-Code
+
+### My policy file (paste labs/lab9/policies/extra/hardening.rego)
+```rego
+<paste>
+```
+
+### Good manifest passes
+```
+<paste conftest output — 0 failures>
+```
+
+### Bad manifest 1 fails (runAsRoot)
+```
+<paste conftest output — deny messages>
+```
+
+### Bad manifest 2 fails (no resources)
+```
+<paste conftest output>
+```
+
+### Why CI-time vs admission-time (Lecture 9 slide 9)
+2-3 sentences. CI-time Conftest happens during PR review; admission-time Conftest happens at
+`kubectl apply`. What's the operational benefit of running BOTH (defense in depth)?
+```
 
 ---
 
-## Acceptance Criteria
+## Bonus Task — Detect Cryptominer Network Pattern (2 pts)
 
-- ✅ Branch `feature/lab9` contains Falco setup, logs, and a custom rule file
-- ✅ At least two Falco alerts captured and explained (baseline + custom)
-- ✅ Conftest policies reviewed and tested against manifests
-- ✅ Unhardened K8s manifest fails; hardened manifest passes (warnings OK)
-- ✅ `labs/submission9.md` includes evidence and analysis for both tasks
+> 🌟 **Practical & directly maps to real attacks.** The Tesla 2018 incident (Lecture 1 + 6) had cryptominers on an exposed K8s dashboard. This rule would have flagged the egress within minutes.
+
+**Objective:** Write a Falco rule that detects a container connecting to common mining-pool ports/domains.
+
+### B.1: Pick the detection pattern
+
+Common cryptominer indicators (any 2 are sufficient for the rule):
+
+| Indicator | Pattern |
+|---|---|
+| Connection to mining pool port | `tcp.dport in (3333, 4444, 5555, 7777, 14444, 19999, 45700)` |
+| DNS query for known pool hostname | `evt.type=connect and fd.sockfamily=ip and fd.cip.name contains "minexmr"` |
+| Process name matches known miner | `proc.name in (xmrig, ethminer, cgminer, t-rex, claymore)` |
+| High CPU + low network ratio | (Out of scope — needs metrics) |
+
+### B.2: Write the rule
+
+Add to `labs/lab9/falco/rules/custom-rules.yaml`:
+
+```yaml
+# YOUR TASK: Detect cryptominer network/process pattern
+# Requirements:
+#   - rule: "Possible Cryptominer Activity"
+#   - condition: combines AT LEAST 2 of the indicators above
+#   - priority: CRITICAL
+#   - tags: [container, mitre_execution, mitre_command_and_control]
+#   - output: must include container, process, target (IP/port/name)
+```
+
+### B.3: Trigger your rule
+
+Simulating a connection to a typical mining-pool port:
+
+```bash
+# Don't actually connect to a real pool — use a netcat to a non-existent local address
+docker exec lab9-target /bin/sh -c 'nc -w 2 127.0.0.1 3333' 2>/dev/null || true
+sleep 3
+grep "Cryptominer" labs/lab9/falco/logs/falco.log
+```
+
+### B.4: Document in `submissions/lab9.md`
+
+```markdown
+## Bonus: Cryptominer Detection Rule
+
+### Rule (paste)
+```yaml
+<paste>
+```
+
+### Triggered alert
+```json
+<paste — must show the rule firing on the nc test>
+```
+
+### Reflection (2-3 sentences)
+- Which 2 indicators did you use and why?
+- What does this miss? (i.e., the false-negative case — e.g., obfuscated mining over HTTPS)
+- How would you combine this with the Lecture 9 SLA matrix?
+```
+
+---
+
+## Cleanup
+
+```bash
+# Stop the tail
+kill $LOGS_PID 2>/dev/null || true
+
+# Stop containers
+docker stop falco lab9-target
+docker rm falco lab9-target
+```
 
 ---
 
 ## How to Submit
 
-1. Create a branch and push it to your fork:
 ```bash
-git switch -c feature/lab9
-# create labs/submission9.md with your findings
-git add labs/lab9/ labs/submission9.md
-git commit -m "docs: add lab9 — falco runtime + conftest policies"
+git add labs/lab9/falco/rules/custom-rules.yaml
+git add labs/lab9/policies/extra/                # Task 2 only
+git add submissions/lab9.md
+git commit -m "feat(lab9): falco custom rules + conftest hardening policies"
 git push -u origin feature/lab9
 ```
-2. Open a PR from your fork’s `feature/lab9` → course repo’s `main`.
-3. In the PR description include:
+
+> **Do NOT commit** `labs/lab9/falco/logs/` — log files are large and student-specific. Submission paste-ins are the evidence.
+
+PR checklist body:
+
 ```text
-- [x] Task 1 — Falco runtime detection (alerts + custom rule)
-- [x] Task 2 — Conftest policies (fail→pass hardening)
+- [x] Task 1 — 2 baseline + 1 custom Falco alert with tuning discussion
+- [ ] Task 2 — ≥3 Conftest rules, passing on good manifest, failing on bad
+- [ ] Bonus — Cryptominer detection rule with triggered alert
 ```
-4. Submit the PR URL via Moodle before the deadline.
 
 ---
 
-## Rubric (10 pts)
+## Acceptance Criteria
 
-| Criterion                                                       | Points |
-| --------------------------------------------------------------- | -----: |
-| Task 1 — Falco runtime detection + custom rule                  |    6.0 |
-| Task 2 — Conftest policies + hardened manifests                 |    4.0 |
-| Total                                                           |   10.0 |
+### Task 1 (6 pts)
+- ✅ Falco running with modern eBPF (verify with `docker logs falco | grep -i engine`)
+- ✅ Both baseline alerts (Terminal shell + Container drift) appear in Falco logs
+- ✅ Custom rule `custom-rules.yaml` exists with required fields
+- ✅ Custom rule fires (visible in Falco log after the test trigger)
+- ✅ Tuning consideration mentions `exceptions:` block OR `and not` pattern with reasoning
+
+### Task 2 (4 pts)
+- ✅ ≥3 Rego rules in `labs/lab9/policies/extra/`
+- ✅ Good manifest PASSES (0 failures from conftest)
+- ✅ ≥2 bad manifests FAIL with clear deny messages
+- ✅ CI-vs-admission answer demonstrates understanding of defense-in-depth
+
+### Bonus Task (2 pts)
+- ✅ Cryptominer rule combines ≥2 indicators (port OR process OR DNS)
+- ✅ Rule fires on the `nc` test trigger (visible in Falco log)
+- ✅ Reflection covers false-negative case + SLA matrix integration
 
 ---
 
-## Guidelines
+## Rubric
 
-- Keep Falco running while you trigger events; copy only relevant alert lines into your submission
-- Place custom Falco rules under `labs/lab9/falco/rules/` and commit them
-- Conftest “deny” enforces hard requirements; “warn” provides guidance without failing
-- Aim for minimal, practical policies that reflect production hardening baselines
+| Task | Points | Criteria |
+|------|-------:|----------|
+| **Task 1** — Falco runtime | **6** | 2 baseline + 1 custom alert + tuning discussion |
+| **Task 2** — Conftest policies | **4** | 3+ Rego rules + good passes + bad fails + CI/admission reasoning |
+| **Bonus Task** — Cryptominer rule | **2** | 2+ indicators + triggered alert + reflection on FN + SLA |
+| **Total** | **12** | 10 main + 2 bonus |
+
+---
+
+## Resources
 
 <details>
-<summary>References</summary>
+<summary>📚 Documentation</summary>
 
-- Falco: https://falco.org/docs/
-- Falco container: https://github.com/falcosecurity/falco
-- Event Generator: https://github.com/falcosecurity/event-generator
-- Conftest: https://github.com/open-policy-agent/conftest
-- OPA/Rego: https://www.openpolicyagent.org/docs/
+- [Falco rules reference](https://falco.org/docs/rules/) — Default rules + macro reference
+- [Falco fields reference](https://falco.org/docs/reference/rules/supported-fields/) — All `%evt.*`, `%proc.*`, `%container.*` fields
+- [Conftest documentation](https://www.conftest.dev/) — CLI + Rego patterns
+- [OPA Rego playground](https://play.openpolicyagent.org/) — 30-min interactive tutorial
+- [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) — What your Conftest policies enforce
 
 </details>
 
 <details>
-<summary>Troubleshooting</summary>
+<summary>⚠️ Common Pitfalls</summary>
 
-- Falco engine: If Falco logs show that modern eBPF is unsupported, switch engine with: `-o engine.kind=ebpf` in the `docker run` command.
-- Permissions: Ensure Docker is running and you can run privileged containers. If `--privileged` or mounts fail, try a Linux host or WSL2.
-- Container context: For drift tests, write from inside the container (not `docker cp`) so Falco reports a non-host `container.id`.
-- Conftest: If pulling the image fails, try specifying a version tag, e.g., `openpolicyagent/conftest:v0.63.0`.
+- 🚨 **Falco fails to start with "engine.kind not detected"** — your kernel might be < 5.8 (no modern eBPF). Fall back to the legacy eBPF driver: add `-e FALCO_BPF_PROBE=""` to the docker run command.
+- 🚨 **No alerts fire after triggering** — Falco needs a few seconds to load rules. Wait 5+ seconds between starting Falco and triggering. Also confirm rules loaded with `docker logs falco | grep -i "loaded rule"`.
+- 🚨 **Custom rule has YAML parse error and silently doesn't load** — `docker logs falco | grep -i error` shows the parse error. Common cause: indentation. Validate with `yq eval . custom-rules.yaml`.
+- 🚨 **`docker kill --signal=SIGHUP falco`** — used to reload rules; if you instead `docker restart falco`, the log file gets truncated.
+- 🚨 **Conftest deny message is "Rego_typecheck_error: undefined function..."** — usually old Rego syntax. Conftest 0.68.x supports Rego v1; use `not "ALL" in container.securityContext.capabilities.drop` syntax.
+- 🚨 **Cryptominer rule fires on legitimate dev work** — yes. That's the noise/signal tradeoff in Lecture 9 slide 8. The lab's submission requires you to acknowledge this in the reflection.
+- 💡 **Read `/etc/falco/falco_rules.yaml`** inside the container before writing your own. `docker exec falco cat /etc/falco/falco_rules.yaml | head -100` shows the default ruleset's macros — your rules will be cleaner if you use the same ones (`open_write`, `container_started`, `proc_is_new`).
 
 </details>
 
-### Cleanup
-```bash
-docker rm -f falco lab9-helper 2>/dev/null || true
-```
+<details>
+<summary>🪜 Looking ahead</summary>
+
+- **Lab 10** (DefectDojo) — your Falco alerts can be ingested as a "runtime" finding source alongside Trivy/Grype/Semgrep
+- The Conftest policies you wrote are the foundation of admission-time gating (Lecture 9 slide 16). Real production deployments add Kyverno or Sigstore policy-controller; your Rego skills transfer directly.
+
+</details>
