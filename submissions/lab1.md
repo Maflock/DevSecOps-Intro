@@ -119,10 +119,25 @@ Following developers keeps you informed about their activity, lays the groundwor
 
 - Workflow file: `.github/workflows/lab1-smoke.yml`
 - Trigger: `pull_request` on main
-- Run URL (must be green): [<link to Actions run>](https://github.com/Maflock/DevSecOps-Intro/actions/runs/27378047940/job/80907374905)
-- Workflow run duration:
+- Run URL (must be green): [<link to Actions run>](https://github.com/Maflock/DevSecOps-Intro/actions/runs/27378571404/job/80909140566)
+- Workflow run duration: 29s
 - Curl response excerpt:
 
 ```
-
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+Feature-Policy: payment 'self'
+X-Recruiting: /#/jobs
+Accept-Ranges: bytes
+Cache-Control: public, max-age=0
+Last-Modified: Thu, 11 Jun 2026 21:28:49 GMT
+ETag: W/"26af-19eb89678fe"
+Content-Type: text/html; charset=UTF-8
+Content-Length: 9903
+Vary: Accept-Encoding
+Date: Thu, 11 Jun 2026 21:28:51 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
 ```
