@@ -119,7 +119,7 @@ Following developers keeps you informed about their activity, lays the groundwor
 
 - Workflow file: `.github/workflows/lab1-smoke.yml`
 - Trigger: `pull_request` on main
-- Run URL (must be green): [<link to Actions run>](https://github.com/AskoRBINKAs/DevSecOps-Intro/actions/runs/27238144616/job/80435256342)
+- Run URL (must be green): [<link to Actions run>](https://github.com/Maflock/DevSecOps-Intro/actions/runs/27378047940/job/80907374905)
 - Workflow run duration:
 - Curl response excerpt:
 
