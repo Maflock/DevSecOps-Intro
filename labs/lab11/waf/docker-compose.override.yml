@@ -1,0 +1,30 @@
+services:
+  waf:
+    image: owasp/modsecurity-crs:4.25.1-nginx-alpine-lts
+    restart: unless-stopped
+    depends_on:
+      - nginx
+    ports:
+      - "8081:8080"
+      - "9443:8443"
+    environment:
+      BACKEND: "https://nginx:8443"
+      PORT: "8080"
+      SSL_PORT: "8443"
+      SERVER_NAME: "localhost-waf"
+      MODSEC_RULE_ENGINE: "On"
+      MODSEC_AUDIT_ENGINE: "RelevantOnly"
+      MODSEC_AUDIT_LOG: "/var/log/modsec/audit.log"
+      BLOCKING_PARANOIA: "1"
+      DETECTION_PARANOIA: "1"
+      ANOMALY_INBOUND: "5"
+      ANOMALY_OUTBOUND: "4"
+      PROXY_SSL_VERIFY: "off"
+      PROXY_SSL_PROTOCOLS: "TLSv1.3"
+      NGINX_ALWAYS_TLS_REDIRECT: "on"
+      LOGLEVEL: "warn"
+    volumes:
+      - modsec-audit:/var/log/modsec
+
+volumes:
+  modsec-audit:
